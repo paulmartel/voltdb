@@ -259,7 +259,7 @@ public class TestVoltProcedure extends TestCase {
     }
 
     MockVoltDB manager;
-    SiteProcedureConnection site;
+    AdHocProcedureConnection site;
     MockStatsAgent agent;
     ParameterSet nullParam;
     private long executionSiteId;
@@ -293,7 +293,7 @@ public class TestVoltProcedure extends TestCase {
         manager.addProcedureForTest(NPEProcedure.class.getName());
         manager.addProcedureForTest(LargeNumberOfTablesProc.class.getName());
         manager.addProcedureForTest(UnexpectedFailureFourProcedure.class.getName());
-        site = mock(SiteProcedureConnection.class);
+        site = mock(AdHocProcedureConnection.class);
         doReturn(42).when(site).getCorrespondingPartitionId();
         doReturn(executionSiteId).when(site).getCorrespondingSiteId();
         nullParam = ParameterSet.fromArrayNoCopy(new Object[]{null});

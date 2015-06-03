@@ -373,7 +373,7 @@ public class StreamSnapshotWritePlan extends SnapshotWritePlan
             }
 
             // Update partition count stored on this site
-            context.setNumberOfPartitions(m_newPartitionCount);
+            context.getSiteSnapshotConnection().setNumberOfPartitions(m_newPartitionCount);
         }
     }
 

@@ -25,6 +25,7 @@ import org.voltcore.logging.VoltLogger;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.DBBPool;
 import org.voltcore.utils.Pair;
+import org.voltdb.AdHocProcedureConnection;
 import org.voltdb.BackendTarget;
 import org.voltdb.CatalogContext;
 import org.voltdb.CatalogSpecificPlanner;
@@ -35,18 +36,15 @@ import org.voltdb.ParameterSet;
 import org.voltdb.ProcedureRunner;
 import org.voltdb.SiteProcedureConnection;
 import org.voltdb.SiteSnapshotConnection;
-import org.voltdb.StatsSelector;
 import org.voltdb.SystemProcedureExecutionContext;
 import org.voltdb.TableStreamType;
 import org.voltdb.TheHashinator;
-import org.voltdb.TupleStreamStateInfo;
 import org.voltdb.VoltDB;
 import org.voltdb.VoltProcedure.VoltAbortException;
 import org.voltdb.VoltTable;
 import org.voltdb.catalog.Cluster;
 import org.voltdb.catalog.Database;
 import org.voltdb.catalog.Procedure;
-import org.voltdb.dtxn.SiteTracker;
 import org.voltdb.dtxn.TransactionState;
 import org.voltdb.dtxn.UndoAction;
 import org.voltdb.exceptions.EEException;
@@ -57,7 +55,7 @@ import org.voltdb.exceptions.EEException;
  * of these will be used to run multiple read-only transactions
  * concurrently.
  */
-public class MpRoSite implements Runnable, SiteProcedureConnection
+public class MpRoSite implements Runnable, SystemProcedureExecutionContext, AdHocProcedureConnection, SiteProcedureConnection
 {
     @SuppressWarnings("unused")
     private static final VoltLogger tmLog = new VoltLogger("TM");
@@ -97,14 +95,29 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
         return this;
     }
 
-    /**
-     * SystemProcedures are "friends" with ExecutionSites and granted
-     * access to internal state via m_systemProcedureContext.
-     *
+    // Advanced in complete transaction.
+    private long m_currentTxnId = Long.MIN_VALUE;
+
+    /*
      * The only sysproc which should run on the RO MP Site is Adhoc.  Everything
      * else will yell at you.
      */
-    SystemProcedureExecutionContext m_sysprocContext = new SystemProcedureExecutionContext() {
+    @Override
+    public byte[] getCatalogHash() {
+        // AdHoc invocations need to be able to check the hash of the current catalog
+        // against the hash of the catalog they were planned against.
+        return m_context.getCatalogHash();
+    }
+
+    /*
+     * The only sysproc which should run on the RO MP Site is Adhoc.  Everything
+     * else will yell at you.
+     */
+    @Override
+    public int getCatalogVersion() {
+        return m_context.catalogVersion;
+    }
+
         @Override
         public Database getDatabase() {
             throw new RuntimeException("Not needed for RO MP Site, shouldn't be here.");
@@ -112,11 +125,6 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
 
         @Override
         public Cluster getCluster() {
-            throw new RuntimeException("Not needed for RO MP Site, shouldn't be here.");
-        }
-
-        @Override
-        public long getSpHandleForSnapshotDigest() {
             throw new RuntimeException("Not needed for RO MP Site, shouldn't be here.");
         }
 
@@ -147,41 +155,12 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
         }
 
         @Override
-        public byte[] getCatalogHash() {
-            // AdHoc invocations need to be able to check the hash of the current catalog
-            // against the hash of the catalog they were planned against.
-            return m_context.getCatalogHash();
-        }
-
-        @Override
         public byte[] getDeploymentHash() {
-            throw new RuntimeException("Not needed for RO MP Site, shouldn't be here.");
-        }
-
-        // Needed for Adhoc queries
-        @Override
-        public int getCatalogVersion() {
-            return m_context.catalogVersion;
-        }
-
-        @Override
-        public SiteTracker getSiteTrackerForSnapshot() {
             throw new RuntimeException("Not needed for RO MP Site, shouldn't be here.");
         }
 
         @Override
         public int getNumberOfPartitions() {
-            throw new RuntimeException("Not needed for RO MP Site, shouldn't be here.");
-        }
-
-        @Override
-        public void setNumberOfPartitions(int partitionCount) {
-            throw new RuntimeException("Not needed for RO MP Site, shouldn't be here.");
-        }
-
-        @Override
-        public SiteProcedureConnection getSiteProcedureConnection()
-        {
             throw new RuntimeException("Not needed for RO MP Site, shouldn't be here.");
         }
 
@@ -192,25 +171,8 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
         }
 
         @Override
-        public void updateBackendLogLevels() {
-            throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
-        }
-
-        @Override
         public boolean updateCatalog(String diffCmds, CatalogContext context,
                 CatalogSpecificPlanner csp, boolean requiresSnapshotIsolation)
-        {
-            throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
-        }
-
-        @Override
-        public TheHashinator getCurrentHashinator()
-        {
-            throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
-        }
-
-        @Override
-        public void updateHashinator(TheHashinator hashinator)
         {
             throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
         }
@@ -222,12 +184,15 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
         }
 
         @Override
+<<<<<<< HEAD
         public void forceAllBuffersToDiskForDRAndExport(final boolean nofsync)
         {
             throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
         }
 
         @Override
+=======
+>>>>>>> Too far on Site interface shuffling.
         public Pair<Long, int[]> tableStreamSerializeMore(int tableId, TableStreamType type,
                 List<DBBPool.BBContainer> outputBuffers)
         {
@@ -238,7 +203,6 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
         public Procedure ensureDefaultProcLoaded(String procName) {
             throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
         }
-    };
 
     /** Create a new RO MP execution site */
     public MpRoSite(
@@ -246,19 +210,28 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
             long siteId,
             BackendTarget backend,
             CatalogContext context,
-            int partitionId)
+            int partitionId,
+            CatalogSpecificPlanner csp)
     {
         m_siteId = siteId;
         m_context = context;
         m_partitionId = partitionId;
         m_scheduler = scheduler;
         m_backend = backend;
+<<<<<<< HEAD
     }
 
     /** Update the loaded procedures. */
     void setLoadedProcedures(LoadedProcedureSet loadedProcedure)
     {
         m_loadedProcedures = loadedProcedure;
+=======
+        m_currentTxnId = Long.MIN_VALUE;
+        m_loadedProcedures = new LoadedProcedureSet(this, this,
+                siteId,
+                0, // Stale constructor arg, fill with bleh
+                context, backend, csp);
+>>>>>>> Too far on Site interface shuffling.
     }
 
     /** Thread specific initialization */
@@ -282,7 +255,14 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
             while (m_shouldContinue) {
                 // Normal operation blocks the site thread on the sitetasker queue.
                 SiteTasker task = m_scheduler.take();
+<<<<<<< HEAD
                 task.run(getSiteProcedureConnection());
+=======
+                if (task instanceof TransactionTask) {
+                    m_currentTxnId = ((TransactionTask)task).getTxnId();
+                }
+                task.run(this);
+>>>>>>> Too far on Site interface shuffling.
             }
         }
         catch (OutOfMemoryError e)
@@ -343,17 +323,17 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
     }
 
     @Override
-    public byte[] loadTable(long txnId, long spHandle, long unqiueId, String clusterName, String databaseName,
-            String tableName, VoltTable data, boolean returnUniqueViolations, boolean shouldDRStream,
-            boolean undo) throws VoltAbortException
+    public byte[] loadTable(long txnId, long spHandle, long uniqueId,
+            String tableName, VoltTable data,
+            boolean returnUniqueViolations, boolean shouldDRStream) throws VoltAbortException
     {
         throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
     }
 
     @Override
-    public byte[] loadTable(long txnId, long spHandle, long uniqueId, int tableId, VoltTable data, boolean returnUniqueViolations,
-            boolean shouldDRStream,
-            boolean undo)
+    public byte[] loadTable(long txnId, long spHandle, long uniqueId,
+            int tableId, VoltTable data, boolean returnUniqueViolations,
+            boolean shouldDRStream, boolean undo)
     {
         throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
     }
@@ -412,18 +392,6 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
     }
 
     @Override
-    public TupleStreamStateInfo getDRTupleStreamStateInfo()
-    {
-        throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
-    }
-
-    @Override
-    public void setDRSequenceNumbers(Long partitionSequenceNumber, Long mpSequenceNumber)
-    {
-        throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
-    }
-
-    @Override
     public void toggleProfiler(int toggle)
     {
         throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
@@ -442,17 +410,14 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
     }
 
     @Override
-    public void exportAction(boolean syncAction,
-                             long ackOffset,
-                             Long sequenceNumber,
+    public void exportAction(long sequenceNumber,
                              Integer partitionId, String tableSignature)
     {
         throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
     }
 
     @Override
-    public VoltTable[] getStats(StatsSelector selector, int[] locators,
-                                boolean interval, Long now)
+    public VoltTable getTableStats(int[] locators, long now)
     {
         throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
     }
@@ -504,14 +469,15 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
     }
 
     @Override
-    public void setPerPartitionTxnIds(long[] perPartitionTxnIds, boolean skipMultipart) {
+    public void setSinglePartitionTxnIds(long[] perPartitionTxnIds)
+    {
         throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
     }
 
     @Override
     public TheHashinator getCurrentHashinator()
     {
-        return null;
+        throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
     }
 
     @Override
@@ -524,7 +490,8 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
      * the provided hashinator and hashinator config
      */
     @Override
-    public long[] validatePartitioning(long[] tableIds, int hashinatorType, byte[] hashinatorConfig) {
+    public void validatePartitioning(VoltTable result, long[] tableIds,
+            String[] tableNames, int hashinatorType, byte[] hashinatorConfig) {
         throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
     }
 
@@ -545,6 +512,7 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
     }
 
     @Override
+<<<<<<< HEAD
     public long applyBinaryLog(long txnId, long spHandle, long uniqueId, byte log[]) {
         throw new UnsupportedOperationException("RO MP Site doesn't do this, shouldn't be here");
     }
@@ -556,6 +524,9 @@ public class MpRoSite implements Runnable, SiteProcedureConnection
 
     @Override
     public int getBatchTimeout() {
+=======
+    public void applyBinaryLog(ProcedureRunner runner, byte log[]) {
+>>>>>>> Too far on Site interface shuffling.
         throw new UnsupportedOperationException("RO MP Site doesn't do this, shouldn't be here");
     }
 }

@@ -32,7 +32,6 @@ import org.voltdb.ConsumerDRGateway;
 import org.voltdb.LoadedProcedureSet;
 import org.voltdb.MemoryStats;
 import org.voltdb.PartitionDRGateway;
-import org.voltdb.ProcedureRunnerFactory;
 import org.voltdb.StartAction;
 import org.voltdb.StarvationTracker;
 import org.voltdb.StatsAgent;
@@ -166,17 +165,8 @@ public abstract class BaseInitiator implements Initiator
                                        coreBindIds,
                                        taskLog,
                                        drGateway,
-                                       mpDrGateway);
-            ProcedureRunnerFactory prf = new ProcedureRunnerFactory();
-            prf.configure(m_executionSite, m_executionSite.m_sysprocContext);
-
-            LoadedProcedureSet procSet = new LoadedProcedureSet(
-                    m_executionSite,
-                    prf,
-                    m_initiatorMailbox.getHSId(),
-                    0); // this has no meaning
-            procSet.loadProcedures(catalogContext, backend, csp);
-            m_executionSite.setLoadedProcedures(procSet);
+                                       mpDrGateway,
+                                       csp);
             m_scheduler.setCommandLog(cl);
 
             m_siteThread = new Thread(m_executionSite);
