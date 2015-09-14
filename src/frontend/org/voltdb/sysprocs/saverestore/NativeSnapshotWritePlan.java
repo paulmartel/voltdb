@@ -250,13 +250,13 @@ public class NativeSnapshotWritePlan extends SnapshotWritePlan
                 SnapshotFormat.NATIVE,
                 hostId);
 
-	VoltTable schemaTable;
+        VoltTable schemaTable;
         if (isActiveActiveDRed && table.getIsdred()) {
-	    schemaTable = CatalogUtil.getVoltTable(table, CatalogUtil.DR_HIDDEN_COLUMN_INFO);
+            schemaTable = CatalogUtil.getVoltTable(table, CatalogUtil.DR_HIDDEN_COLUMN_INFO);
         }
         else {
-	    schemaTable = CatalogUtil.getVoltTable(table);
-	}
+            schemaTable = CatalogUtil.getVoltTable(table);
+        }
         SnapshotDataTarget sdt = new DefaultSnapshotDataTarget(saveFilePath,
                 hostId,
                 table.getTypeName(),
