@@ -18,64 +18,27 @@
 
 #include "common/FatalException.hpp"
 #include "common/ThreadLocalPool.h"
-#include <boost/unordered_map.hpp>
-#include <iostream>
 
-using namespace voltdb;
-using namespace std;
-using boost::shared_ptr;
+namespace voltdb {
 
-typedef boost::shared_ptr<CompactingStringPool> PoolPtrType;
-typedef boost::unordered_map<size_t, PoolPtrType> MapType;
-
-CompactingStringStorage::CompactingStringStorage()
-{
-}
-
-CompactingStringStorage::~CompactingStringStorage()
-{
-}
-
-PoolPtrType
-CompactingStringStorage::get(size_t size)
+CompactingStringStorage::PoolPtr CompactingStringStorage::get(std::size_t size)
 {
     size_t alloc_size = ThreadLocalPool::getAllocationSizeForObject(size);
-    if (alloc_size == 0)
-    {
+    if (alloc_size == 0) {
         throwFatalException("Attempted to allocate an object then the 1 meg limit. Requested size was %d",
-            static_cast<int32_t>(size));
+                            static_cast<int32_t>(size));
     }
-    return getExact(alloc_size);
-}
-
-PoolPtrType
-CompactingStringStorage::getExact(size_t size)
-{
-    MapType::iterator iter = m_poolMap.find(size);
-    int32_t ssize = static_cast<int32_t>(size);
-    PoolPtrType pool;
+    PoolMapIter iter = m_poolMap.find(alloc_size);
     if (iter == m_poolMap.end()) {
         // compute num_elements to be closest multiple
         // leading to a 2Meg buffer
+        int32_t ssize = static_cast<int32_t>(alloc_size);
         int32_t num_elements = (2 * 1024 * 1024 / ssize) + 1;
-        pool = PoolPtrType(new CompactingStringPool(ssize, num_elements));
-        m_poolMap.insert(pair<size_t, PoolPtrType>(size, pool));
+        PoolPtr pool(new CompactingStringPool(alloc_size, num_elements));
+        m_poolMap.insert(std::pair<std::size_t, PoolPtr>(alloc_size, pool));
+        return pool;
     }
-    else
-    {
-        pool = iter->second;
-    }
-    return pool;
+    return iter->second;
 }
 
-size_t CompactingStringStorage::getPoolAllocationSize()
-{
-    size_t total = 0;
-    for (MapType::iterator iter = m_poolMap.begin();
-         iter != m_poolMap.end();
-         ++iter)
-    {
-        total += iter->second->getBytesAllocated();
-    }
-    return total;
-}
+} // namespace voltdb

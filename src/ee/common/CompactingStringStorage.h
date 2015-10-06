@@ -24,21 +24,32 @@
 
 namespace voltdb {
 
-    class CompactingStringStorage {
-    public:
-        CompactingStringStorage();
-        ~CompactingStringStorage();
+class CompactingStringStorage {
+public:
+    CompactingStringStorage() { }
+    ~CompactingStringStorage() { }
 
-        boost::shared_ptr<CompactingStringPool> get(size_t size);
+    typedef boost::shared_ptr<CompactingStringPool> PoolPtr;
+    typedef boost::unordered_map<std::size_t, PoolPtr> PoolMap;
+    typedef PoolMap::iterator PoolMapIter;
 
-        boost::shared_ptr<CompactingStringPool> getExact(size_t size);
+    PoolPtr get(std::size_t size);
 
-        std::size_t getPoolAllocationSize();
+    std::size_t getPoolAllocationSize()
+    {
+        std::size_t total = 0;
+        for (PoolMapIter iter = m_poolMap.begin();
+             iter != m_poolMap.end();
+             ++iter) {
+            total += iter->second->bytesAllocated();
+        }
+        return total;
+    }
 
-    private:
-        boost::unordered_map<size_t,
-                             boost::shared_ptr<CompactingStringPool> > m_poolMap;
-    };
+private:
+    PoolMap m_poolMap;
+};
+
 }
 
 #endif /* COMPACTINGSTRINGSTORAGE_H_ */

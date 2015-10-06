@@ -15,11 +15,14 @@
  * along with VoltDB.  If not, see <http://www.gnu.org/licenses/>.
  */
 #include "common/ThreadLocalPool.h"
-#include <pthread.h>
-#include <boost/unordered_map.hpp>
+#include "common/CompactingStringStorage.h"
 #include "common/FatalException.hpp"
-#include <iostream>
 #include "common/SQLException.h"
+
+#include <boost/unordered_map.hpp>
+
+#include <iostream>
+#include <pthread.h>
 
 namespace voltdb {
 // This needs to be >= the VoltType.MAX_VALUE_LENGTH defined in java, currently 1048576.
@@ -171,11 +174,24 @@ ThreadLocalPool::getAllocationSizeForObject(std::size_t length) {
     }
 }
 
-CompactingStringStorage*
-ThreadLocalPool::getStringPool()
+static CompactingStringStorage* getStringPool()
+{ return static_cast<CompactingStringStorage*>(pthread_getspecific(m_stringKey)); }
+
+#ifndef MEMCHECK
+char* ThreadLocalPool::allocateRelocatable(std::size_t sz, char** referringAddress)
 {
-    return static_cast<CompactingStringStorage*>(pthread_getspecific(m_stringKey));
+    // There had better be at least enough space allocated for the back-pointer.
+    assert(sz >= 8);
+    return reinterpret_cast<char*>(getStringPool()->get(sz)->alloc(referringAddress));
 }
+
+void ThreadLocalPool::freeRelocatable(std::size_t sz, char* allocated)
+{
+    // There had better have been at least enough space allocated for the back-pointer.
+    assert(sz >= 8);
+    getStringPool()->get(sz)->free(allocated);
+}
+#endif
 
 boost::shared_ptr<boost::pool<voltdb_pool_allocator_new_delete> > ThreadLocalPool::get(std::size_t size) {
     size_t alloc_size = getAllocationSizeForObject(size);

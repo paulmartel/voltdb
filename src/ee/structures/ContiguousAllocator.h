@@ -54,6 +54,7 @@ public:
     void trim();
     void clear();
     int64_t count() const { return m_count; }
+    int32_t allocSize() const { return m_allocSize; }
 
     size_t bytesAllocated() const;
 };

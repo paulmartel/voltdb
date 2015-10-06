@@ -18,8 +18,6 @@
 #ifndef THREADLOCALPOOL_H_
 #define THREADLOCALPOOL_H_
 
-#include "CompactingStringStorage.h"
-
 #include "boost/pool/pool.hpp"
 #include "boost/shared_ptr.hpp"
 
@@ -47,7 +45,23 @@ public:
 
     static const int POOLED_MAX_VALUE_LENGTH;
 
-    /**
+    /// This generic packaging of fixed-size allocation hides the underlying pool.
+    static void* allocateExactSize(std::size_t size)
+    { return getExact(size)->malloc(); }
+
+    /// This generic packaging of fixed-size deallocation hides the underlying pool.
+    static void freeExactSizeAllocation(std::size_t size, void* allocated)
+    { getExact(size)->free(allocated); }
+
+    /// This generic packaging of variable approximate-size allocation hides the underlying pool.
+    /// It also encapsulates the disabling of the StringPool when MEMCHECK is enabled.
+    static char* allocateRelocatable(std::size_t size, char** referringAddress);
+
+    /// This generic packaging of variable approximate-size deallocation hides the underlying pool.
+    /// It also encapsulates the disabling of the StringPool when MEMCHECK is enabled.
+    static void freeRelocatable(std::size_t size, char* allocated);
+
+     /**
      * Return the nearest power-of-two-plus-or-minus buffer size that
      * will be allocated for an object of the given length
      */
@@ -66,9 +80,39 @@ public:
     static boost::shared_ptr<boost::pool<voltdb_pool_allocator_new_delete> > getExact(std::size_t size);
 
     static std::size_t getPoolAllocationSize();
-
-    static CompactingStringStorage* getStringPool();
 };
+
+/// This alternative implementation approximate-size allocation
+/// encapsulates the disabling of the StringPool when MEMCHECK is enabled.
+/// Since it doesn't implement compaction/relocation of the relocatable,
+/// It goes through the motions of setting up back pointer and forward pointer,
+/// for consistency that can be asserted in the caller regardless of whether
+/// MEMCHECK is enabled. The backpointer will never need to be used or changed
+/// because MEMCHECK bypasses the CompactingStringPool with its
+/// pooling/compacting/relocating functionality.
+#ifdef MEMCHECK
+char* ThreadLocalPool::allocateRelocatable(std::size_t sz, char** referringAddress)
+{
+    // There had better be enough space allocated for at least the back-pointer.
+    assert(sz >= 8);
+    char* result = new char[sz];
+    // Set the back-pointer.
+    *reinterpret_cast<char***>(result) = referringAddress;
+    // Set the forward pointer -- though caller will likely do this as well.
+    *referringAddress = result;
+    return result;
 }
+
+/// This alternative implementation of approximate-size-specific deallocation
+/// encapsulates the disabling of the StringPool when MEMCHECK is enabled.
+void ThreadLocalPool::freeRelocatable(std::size_t sz, char* string)
+{
+    assert(sz >= 8);
+    // There had better have been enough space allocated for at least the back-pointer.
+    delete[] string;
+}
+#endif
+
+} // namespace voltdb
 
 #endif /* THREADLOCALPOOL_H_ */
