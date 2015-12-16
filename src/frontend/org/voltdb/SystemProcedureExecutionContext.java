@@ -67,8 +67,11 @@ public interface SystemProcedureExecutionContext {
 
     boolean activateTableStream(int tableId, TableStreamType type, boolean undo, byte[] predicates);
 
+<<<<<<< HEAD
     public void forceAllBuffersToDiskForDRAndExport(final boolean nofsync);
 
+=======
+>>>>>>> origin/pmartel-site-overwork
     Pair<Long, int[]> tableStreamSerializeMore(int tableId, TableStreamType type,
                                                List<DBBPool.BBContainer> outputBuffers);
 

@@ -92,8 +92,11 @@ import org.voltdb.utils.MinimumRatioMaintainer;
 
 import com.google_voltpatches.common.base.Preconditions;
 
+<<<<<<< HEAD
 import vanilla.java.affinity.impl.PosixJNAAffinity;
 
+=======
+>>>>>>> origin/pmartel-site-overwork
 public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConnection, SystemProcedureExecutionContext, AdHocProcedureConnection
 {
     private static final VoltLogger hostLog = new VoltLogger("HOST");
@@ -331,7 +334,11 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
         }
 
         @Override
+<<<<<<< HEAD
         public void forceAllBuffersToDiskForDRAndExport(final boolean nofsync)
+=======
+        public void forceAllDRNodeBuffersToDisk()
+>>>>>>> origin/pmartel-site-overwork
         {
             m_drGateway.forceAllDRNodeBuffersToDisk(false);
             if (m_mpDrGateway != null) {
@@ -1275,11 +1282,16 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
     }
 
     @Override
+<<<<<<< HEAD
     public long applyBinaryLog(ProcedureRunner runner, byte log[]) throws EEException {
+=======
+    public void applyBinaryLog(ProcedureRunner runner, byte log[]) throws EEException {
+>>>>>>> origin/pmartel-site-overwork
         final TransactionState txnState = runner.getTxnState();
         ByteBuffer paramBuffer = m_ee.getParamBufferForExecuteTask(4 + log.length);
         paramBuffer.putInt(log.length);
         paramBuffer.put(log);
+<<<<<<< HEAD
         return m_ee.applyBinaryLog(paramBuffer, txnState.txnId, txnState.m_spHandle,
                 m_lastCommittedSpHandle, txnState.uniqueId,
                 getNextUndoToken(m_currentTxnId));
@@ -1293,5 +1305,9 @@ public class Site implements Runnable, SiteProcedureConnection, SiteSnapshotConn
     @Override
     public int getBatchTimeout() {
         return m_ee.getBatchTimeout();
+=======
+        m_ee.applyBinaryLog(paramBuffer, txnState.txnId, txnState.m_spHandle, m_lastCommittedSpHandle, txnState.uniqueId,
+                            getNextUndoToken(m_currentTxnId));
+>>>>>>> origin/pmartel-site-overwork
     }
 }

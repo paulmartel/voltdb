@@ -131,6 +131,12 @@ public interface SiteProcedureConnection {
     public TheHashinator getCurrentHashinator();
     public void updateHashinator(TheHashinator hashinator);
     public void notifyOfSnapshotNonce(String nonce, long snapshotSpHandle);
+<<<<<<< HEAD
     public long applyBinaryLog(long txnId, long spHandle, long uniqueId, byte logData[]);
     public void tick();
+=======
+
+    public void tick();
+
+>>>>>>> origin/pmartel-site-overwork
 }

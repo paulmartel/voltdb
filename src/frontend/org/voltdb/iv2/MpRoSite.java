@@ -90,11 +90,16 @@ public class MpRoSite implements Runnable, SystemProcedureExecutionContext, AdHo
         throw new RuntimeException("Not needed for RO MP Site, shouldn't be here.");
     }
 
+<<<<<<< HEAD
     SiteProcedureConnection getSiteProcedureConnection()
     {
         return this;
     }
 
+    // Advanced in complete transaction.
+    private long m_currentTxnId = Long.MIN_VALUE;
+
+=======
     // Advanced in complete transaction.
     private long m_currentTxnId = Long.MIN_VALUE;
 
@@ -109,11 +114,26 @@ public class MpRoSite implements Runnable, SystemProcedureExecutionContext, AdHo
         return m_context.getCatalogHash();
     }
 
+>>>>>>> origin/pmartel-site-overwork
     /*
      * The only sysproc which should run on the RO MP Site is Adhoc.  Everything
      * else will yell at you.
      */
     @Override
+<<<<<<< HEAD
+    public byte[] getCatalogHash() {
+        // AdHoc invocations need to be able to check the hash of the current catalog
+        // against the hash of the catalog they were planned against.
+        return m_context.getCatalogHash();
+    }
+
+    /*
+     * The only sysproc which should run on the RO MP Site is Adhoc.  Everything
+     * else will yell at you.
+     */
+    @Override
+=======
+>>>>>>> origin/pmartel-site-overwork
     public int getCatalogVersion() {
         return m_context.catalogVersion;
     }
@@ -185,6 +205,7 @@ public class MpRoSite implements Runnable, SystemProcedureExecutionContext, AdHo
 
         @Override
 <<<<<<< HEAD
+<<<<<<< HEAD
         public void forceAllBuffersToDiskForDRAndExport(final boolean nofsync)
         {
             throw new RuntimeException("RO MP Site doesn't do this, shouldn't be here.");
@@ -193,6 +214,8 @@ public class MpRoSite implements Runnable, SystemProcedureExecutionContext, AdHo
         @Override
 =======
 >>>>>>> Too far on Site interface shuffling.
+=======
+>>>>>>> origin/pmartel-site-overwork
         public Pair<Long, int[]> tableStreamSerializeMore(int tableId, TableStreamType type,
                 List<DBBPool.BBContainer> outputBuffers)
         {
@@ -219,6 +242,7 @@ public class MpRoSite implements Runnable, SystemProcedureExecutionContext, AdHo
         m_scheduler = scheduler;
         m_backend = backend;
 <<<<<<< HEAD
+<<<<<<< HEAD
     }
 
     /** Update the loaded procedures. */
@@ -226,12 +250,17 @@ public class MpRoSite implements Runnable, SystemProcedureExecutionContext, AdHo
     {
         m_loadedProcedures = loadedProcedure;
 =======
+=======
+>>>>>>> origin/pmartel-site-overwork
         m_currentTxnId = Long.MIN_VALUE;
         m_loadedProcedures = new LoadedProcedureSet(this, this,
                 siteId,
                 0, // Stale constructor arg, fill with bleh
                 context, backend, csp);
+<<<<<<< HEAD
 >>>>>>> Too far on Site interface shuffling.
+=======
+>>>>>>> origin/pmartel-site-overwork
     }
 
     /** Thread specific initialization */
@@ -262,7 +291,10 @@ public class MpRoSite implements Runnable, SystemProcedureExecutionContext, AdHo
                     m_currentTxnId = ((TransactionTask)task).getTxnId();
                 }
                 task.run(this);
+<<<<<<< HEAD
 >>>>>>> Too far on Site interface shuffling.
+=======
+>>>>>>> origin/pmartel-site-overwork
             }
         }
         catch (OutOfMemoryError e)
@@ -513,6 +545,7 @@ public class MpRoSite implements Runnable, SystemProcedureExecutionContext, AdHo
 
     @Override
 <<<<<<< HEAD
+<<<<<<< HEAD
     public long applyBinaryLog(long txnId, long spHandle, long uniqueId, byte log[]) {
         throw new UnsupportedOperationException("RO MP Site doesn't do this, shouldn't be here");
     }
@@ -527,6 +560,9 @@ public class MpRoSite implements Runnable, SystemProcedureExecutionContext, AdHo
 =======
     public void applyBinaryLog(ProcedureRunner runner, byte log[]) {
 >>>>>>> Too far on Site interface shuffling.
+=======
+    public void applyBinaryLog(ProcedureRunner runner, byte log[]) {
+>>>>>>> origin/pmartel-site-overwork
         throw new UnsupportedOperationException("RO MP Site doesn't do this, shouldn't be here");
     }
 }

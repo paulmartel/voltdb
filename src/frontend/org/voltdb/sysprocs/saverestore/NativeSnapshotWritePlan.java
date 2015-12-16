@@ -207,7 +207,11 @@ public class NativeSnapshotWritePlan extends SnapshotWritePlan
                     @Override
                     public void run()
                     {
+<<<<<<< HEAD
                         context.forceAllBuffersToDiskForDRAndExport(false);
+=======
+                        context.getSiteSnapshotConnection().forceAllDRNodeBuffersToDisk();
+>>>>>>> origin/pmartel-site-overwork
                     }
                 });
 
@@ -221,7 +225,10 @@ public class NativeSnapshotWritePlan extends SnapshotWritePlan
                 if (target == null) {
                     target = createDataTargetForTable(file_path, file_nonce, task.m_table, txnId,
                             context.getHostId(), context.getNumberOfPartitions(),
+<<<<<<< HEAD
                             context.getDatabase().getIsactiveactivedred(),
+=======
+>>>>>>> origin/pmartel-site-overwork
                             tracker, timestamp, numTables, snapshotRecord);
                     m_createdTargets.put(task.m_table.getRelativeIndex(), target);
                 }
