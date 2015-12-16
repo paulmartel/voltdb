@@ -36,11 +36,11 @@ import org.voltdb.planner.parseinfo.StmtTableScan;
 import org.voltdb.planner.parseinfo.SubqueryLeafNode;
 import org.voltdb.plannodes.AbstractJoinPlanNode;
 import org.voltdb.plannodes.AbstractPlanNode;
+import org.voltdb.plannodes.AbstractReceivePlanNode;
 import org.voltdb.plannodes.IndexScanPlanNode;
 import org.voltdb.plannodes.NestLoopIndexPlanNode;
 import org.voltdb.plannodes.NestLoopPlanNode;
 import org.voltdb.types.JoinType;
-import org.voltdb.types.PlanNodeType;
 import org.voltdb.utils.PermutationGenerator;
 
 /**
@@ -156,7 +156,7 @@ public class SelectSubPlanAssembler extends SubPlanAssembler {
                 newTrees.add(JoinNode.reconstructJoinTreeFromTableNodes(joinOrder));
             }
             //Collect all the join/where conditions to reassign them later
-            AbstractExpression combinedWhereExpr = subTree.getAllInnerJoinFilters();
+            AbstractExpression combinedWhereExpr = subTree.getAllFilters();
             for (JoinNode newTree : newTrees) {
                 if (combinedWhereExpr != null) {
                     newTree.setWhereExpression((AbstractExpression)combinedWhereExpr.clone());
@@ -191,7 +191,9 @@ public class SelectSubPlanAssembler extends SubPlanAssembler {
             // Analyze join and filter conditions
             joinTree.analyzeJoinExpressions(m_parsedStmt.m_noTableSelectionList);
             // a query that is a little too quirky or complicated.
-            assert(m_parsedStmt.m_noTableSelectionList.size() == 0);
+            if (!m_parsedStmt.m_noTableSelectionList.isEmpty()) {
+                throw new PlanningErrorException("Join with filters that do not depend on joined tables is not supported in VoltDB");
+            }
 
             if ( ! m_partitioning.wasSpecifiedAsSingle()) {
                 // Now that analyzeJoinExpressions has done its job of properly categorizing
@@ -211,8 +213,8 @@ public class SelectSubPlanAssembler extends SubPlanAssembler {
                 // should propagate an error message identifying partitioning as the problem.
                 HashMap<AbstractExpression, Set<AbstractExpression>>
                     valueEquivalence = joinTree.getAllEquivalenceFilters();
-                m_partitioning.analyzeForMultiPartitionAccess(m_parsedStmt.m_tableAliasMap.values(),
-                                                                      valueEquivalence);
+                Collection<StmtTableScan> scans = m_parsedStmt.allScans();
+                m_partitioning.analyzeForMultiPartitionAccess(scans, valueEquivalence);
                 if ( ! m_partitioning.isJoinValid() ) {
                     // The case of more than one independent partitioned table
                     // would result in an illegal plan with more than two fragments.
@@ -578,10 +580,23 @@ public class SelectSubPlanAssembler extends SubPlanAssembler {
                 // InnerPlan is an IndexScan. In this case the inner and inner-outer
                 // non-index join expressions (if any) are in the otherExpr. The former should stay as
                 // an IndexScanPlan predicate and the latter stay at the NLJ node as a join predicate
-                List<AbstractExpression> innerExpr = filterSingleTVEExpressions(innerAccessPath.otherExprs);
-                joinClauses.addAll(innerAccessPath.otherExprs);
+                ArrayList<AbstractExpression> otherExprs = new ArrayList<AbstractExpression>();
+                // PLEASE do not update the "innerAccessPath.otherExprs", it may be reused
+                // for other path evaluation on the other outer side join.
+                List<AbstractExpression> innerExpr = filterSingleTVEExpressions(innerAccessPath.otherExprs, otherExprs);
+                joinClauses.addAll(otherExprs);
                 AbstractExpression indexScanPredicate = ExpressionUtil.combine(innerExpr);
                 ((IndexScanPlanNode)innerPlan).setPredicate(indexScanPredicate);
+            }
+            else if (innerJoinNode instanceof BranchNode && joinNode.getJoinType() == JoinType.LEFT) {
+                // If the innerJoinNode is a LEAF node OR if the join type is an INNER join,
+                // the conditions that apply to the inner side
+                // have been applied as predicates to the inner scan node already.
+
+                // otherExpr of innerAccessPath comes from its parentNode's joinInnerList.
+                // For Outer join (LEFT ONLY at this point), it could mean a join predicate on the table of
+                // the inner node ONLY, that can not be pushed down.
+                joinClauses.addAll(innerAccessPath.otherExprs);
             }
             nljNode.setJoinPredicate(ExpressionUtil.combine(joinClauses));
 
@@ -594,7 +609,7 @@ public class SelectSubPlanAssembler extends SubPlanAssembler {
             // right child node.
             if (needInnerSendReceive) {
                 // This trick only works once per plan.
-                if (outerPlan.hasAnyNodeOfType(PlanNodeType.RECEIVE) || innerPlan.hasAnyNodeOfType(PlanNodeType.RECEIVE)) {
+                if (outerPlan.hasAnyNodeOfClass(AbstractReceivePlanNode.class) || innerPlan.hasAnyNodeOfClass(AbstractReceivePlanNode.class)) {
                     return null;
                 }
                 innerPlan = addSendReceivePair(innerPlan);
@@ -630,21 +645,23 @@ public class SelectSubPlanAssembler extends SubPlanAssembler {
     }
 
     /**
-     * A method to filter out single TVE expressions.
+     * A method to filter out single-TVE expressions.
      *
-     * @param expr List of expressions.
-     * @return List of single TVE expressions from the input collection.
-     *         They are also removed from the input.
+     * @param expr List of single-TVE expressions.
+     * @param otherExprs List of multi-TVE expressions.
+     * @return List of single-TVE expressions from the input collection.
      */
-    private static List<AbstractExpression> filterSingleTVEExpressions(List<AbstractExpression> exprs) {
+    private static List<AbstractExpression> filterSingleTVEExpressions(List<AbstractExpression> exprs,
+            List<AbstractExpression> otherExprs) {
         List<AbstractExpression> singleTVEExprs = new ArrayList<AbstractExpression>();
         for (AbstractExpression expr : exprs) {
             List<TupleValueExpression> tves = ExpressionUtil.getTupleValueExpressions(expr);
             if (tves.size() == 1) {
                 singleTVEExprs.add(expr);
+            } else {
+                otherExprs.add(expr);
             }
         }
-        exprs.removeAll(singleTVEExprs);
         return singleTVEExprs;
     }
 

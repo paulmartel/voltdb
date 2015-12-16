@@ -115,9 +115,16 @@
 </condition>
 
 <!-- Default always round trip DDL in junit. Jenkins will turn this off on master  -->
+<condition property="VOLT_LOG_LEVEL" value="500">
+    <not><isset property="VOLT_LOG_LEVEL"/></not>
+</condition>
+
 <condition property="verifycatalogdebug" value="true">
     <not><isset property="verifycatalogdebug"/></not>
 </condition>
+
+<!-- Property "kitbuild" is true if we're pulling in both Mac and Linux native libraries -->
+<property name="kitbuild" value="false"/>
 
 <!-- Overridden in the Hudson test script. -->
 <property name='junit.haltonfailure'    value='false' />
@@ -135,6 +142,7 @@
     <fileset dir='${vendor.lib.dir}'>
         <include name='*.jar' />
         <exclude name='ant.jar' />
+        <exclude name='classes-java1.6.jar' />
     </fileset>
     <pathelement path="${java.class.path}"/>
     <fileset refid="voltpro.classpath"/>
@@ -157,13 +165,27 @@
 
     <!-- Specific Excluded pro tests -->
     <exclude name="**/TestCommandLogServer.class" />
-    <exclude name="**/TestCommandLog.class"/>
     <exclude name="**/TestPauselessRejoinFuzz.class" /> <!-- fails legacy -->
     <exclude name="**/TestExportBase.class"/>
+    <exclude name="**/TestExportBaseSocketExport.class"/>
     <exclude name="org/voltdb/regressionsuites/TestIV2BlacklistSaveRestoreSysprocSuite.class" /> <!-- fails legacy -->
 
 </patternset>
 
+<patternset id='junit.all.path'>
+    <!-- Standard junit fileset -->
+    <include name='org/hsqldb_voltpatches/**/Test*.class'/>
+    <include name='org/voltcore/**/Test*.class' />
+    <include name='org/voltdb/**/Test*.class'/>
+    <!-- Exclude tests -->
+    <patternset refid="junit.exclusions"/>
+</patternset>
+
+<patternset id='junit.exclude.regression.path'>
+    <exclude name="org/voltdb/regressionsuites/*.class"/>
+</patternset>
+
+<!-- 2 old patternsets which will be deprecated after Docker deployed in testing -->
 <patternset id='junit.regression.h1.path'>
     <!-- Standard junit fileset -->
     <include name='org/voltdb/regressionsuites/TestA*.class' />
@@ -202,17 +224,308 @@
     <patternset refid='junit.exclusions'/>
 </patternset>
 
-<patternset id='junit.all.path'>
+<!-- 6 new patternsets which will be used after Docker deployed in testing -->
+<patternset id='junit.regression.p1.path'>
     <!-- Standard junit fileset -->
-    <include name='org/hsqldb_voltpatches/**/Test*.class'/>
-    <include name='org/voltcore/**/Test*.class' />
-    <include name='org/voltdb/**/Test*.class'/>
+    <include name='org/voltdb/regressionsuites/TestCatalogUpdateSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestDecimalRoundingSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestEELibraryLoaderSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestElasticJoinSettings.class' />
+    <include name='org/voltdb/regressionsuites/TestEmptySchema.class' />
+    <include name='org/voltdb/regressionsuites/TestExecutionSiteDeath.class' />
+    <include name='org/voltdb/regressionsuites/TestExistsNotFactoringSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestExplainCommandSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestFailureDetectSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestFunctionsForJSON.class' />
+    <include name='org/voltdb/regressionsuites/TestGiantDeleteSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestInsertIntoSelectSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestJMXPort.class' />
+    <include name='org/voltdb/regressionsuites/TestJoinsSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestMPMultiRoundTripSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestMultiPartitionSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestQueryTimeout.class' />
+    <include name='org/voltdb/regressionsuites/TestReplicationSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestSQLTypesSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestStatisticsSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestStopNode.class' />
+    <include name='org/voltdb/regressionsuites/TestStopNode2NK1PartitionDetection.class' />
+    <include name='org/voltdb/regressionsuites/TestSystemProcedureSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestTableCountSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestUpdateDeployment.class' />
     <!-- Exclude tests -->
-    <patternset refid="junit.exclusions"/>
+    <patternset refid='junit.exclusions'/>
 </patternset>
 
-<patternset id='junit.exclude.regression.path'>
-    <exclude name="org/voltdb/regressionsuites/*.class"/>
+<patternset id='junit.regression.p2.path'>
+    <!-- Standard junit fileset -->
+    <include name='org/voltdb/regressionsuites/TestCRUDSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestCatalogUpdateAutoUpgradeSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestCompactingViewsSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestDecimalDefaults.class' />
+    <include name='org/voltdb/regressionsuites/TestFailuresSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestFunctionsForVoltDBSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestGroupByComplexMaterializedViewSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestGroupBySuite.class' />
+    <include name='org/voltdb/regressionsuites/TestHttpPort.class' />
+    <include name='org/voltdb/regressionsuites/TestIndexColumnLessThanSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestIndexLimitSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestIndexMemoryOwnershipSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestIndexOverflowSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestIndexesSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestLimitOffsetSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestLoadingSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestMaxSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestPartialIndexesSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestPartitionDetection.class' />
+    <include name='org/voltdb/regressionsuites/TestPasswordMaskSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestRollbackSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestSPBasecaseSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestSaveRestoreSysprocSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestSecurityNoAdminUser.class' />
+    <include name='org/voltdb/regressionsuites/TestShutdown.class' />
+    <include name='org/voltdb/regressionsuites/TestSqlAggregateSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestSqlUpdateSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestSqlUpsertSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestUnionSuite.class' />
+    <include name='org/voltdb/regressionsuites/TestUpdateClasses.class' />
+
+    <!-- Exclude tests -->
+    <patternset refid='junit.exclusions'/>
+</patternset>
+
+<patternset id='junit.regression.p3.path'>
+    <!-- Standard junit fileset -->
+    <include name="org/voltdb/regressionsuites/Test*.class"/>
+
+    <!-- Exclude tests -->
+    <invert>
+        <patternset refid="junit.regression.p1.path"/>
+        <patternset refid="junit.regression.p2.path"/>
+    </invert>
+    <patternset refid='junit.exclusions'/>
+</patternset>
+
+<patternset id='junit.other.p1.path'>
+    <!-- Standard junit fileset -->
+    <include name='org/hsqldb_voltpatches/TestJDBC.class' />
+    <include name='org/voltcore/agreement/TestMeshArbiter.class' />
+    <include name='org/voltcore/messaging/TestHostMessenger.class' />
+    <include name='org/voltcore/messaging/TestMessaging.class' />
+    <include name='org/voltcore/messaging/TestSiteFailureMessage.class' />
+    <include name='org/voltcore/network/TestNIOReadStream.class' />
+    <include name='org/voltcore/network/TestNIOWriteStream.class' />
+    <include name='org/voltcore/utils/TestCOWMap.class' />
+    <include name='org/voltcore/utils/TestCOWSortedMap.class' />
+    <include name='org/voltcore/utils/TestMurmur3.class' />
+    <include name='org/voltcore/utils/TestRateLimitedLogger.class' />
+    <include name='org/voltcore/zk/TestBabySitter.class' />
+    <include name='org/voltcore/zk/TestMapCache.class' />
+    <include name='org/voltcore/zk/TestStateMachine.class' />
+    <include name='org/voltdb/TestAdHocCLReplay.class' />
+    <include name='org/voltdb/TestAdhocCompilerErrorMessages.class' />
+    <include name='org/voltdb/TestAdhocCreateDropRole.class' />
+    <include name='org/voltdb/TestAdhocCreateStatementProc.class' />
+    <include name='org/voltdb/TestAdhocDropTable.class' />
+    <include name='org/voltdb/TestAdhocWithOnlyComment.class' />
+    <include name='org/voltdb/TestBuildString.class' />
+    <include name='org/voltdb/TestCLReplayAutoCatalogUpgrade.class' />
+    <include name='org/voltdb/TestExportInsertIntoSelectSuite.class' />
+    <include name='org/voltdb/TestJoin.class' />
+    <include name='org/voltdb/TestPortPirate.class' />
+    <include name='org/voltdb/TestReplicatedInvocation.class' />
+    <include name='org/voltdb/TestRoutingEdgeCases.class' />
+    <include name='org/voltdb/TestSimpleCJK.class' />
+    <include name='org/voltdb/TestSnapshotDaemon.class' />
+    <include name='org/voltdb/TestSnapshotDaemonLeaderElection.class' />
+    <include name='org/voltdb/TestSnapshotIOAgent.class' />
+    <include name='org/voltdb/TestSnapshotInitiationInfo.class' />
+    <include name='org/voltdb/TestStartAction.class' />
+    <include name='org/voltdb/TestStatsAgent.class' />
+    <include name='org/voltdb/TestStatsProcInputTable.class' />
+    <include name='org/voltdb/TestStatsProcOutputTable.class' />
+    <include name='org/voltdb/TestStatsProcProfTable.class' />
+    <include name='org/voltdb/TestTableHelper.class' />
+    <include name='org/voltdb/TestTheHashinator.class' />
+    <include name='org/voltdb/TestTransactionIdManager.class' />
+    <include name='org/voltdb/TestTwoSitePlans.class' />
+    <include name='org/voltdb/TestVarBinaryPartition.class' />
+    <include name='org/voltdb/TestVoltDB.class' />
+    <include name='org/voltdb/TestVoltTable.class' />
+    <include name='org/voltdb/TestVoltTableUtil.class' />
+    <include name='org/voltdb/TestVoltType.class' />
+    <include name='org/voltdb/canonicalddl/TestCanonicalDDLThroughSQLcmd.class' />
+    <include name='org/voltdb/client/TestDistributer.class' />
+    <include name='org/voltdb/client/TestHashinatorLite.class' />
+    <include name='org/voltdb/client/TestProcedureInvocation.class' />
+    <include name='org/voltdb/common/TestPermission.class' />
+    <include name='org/voltdb/compiler/TestAsyncCompilerAgent.class' />
+    <include name='org/voltdb/compiler/TestCatalogVersionUpgrade.class' />
+    <include name='org/voltdb/compiler/TestClassMatcher.class' />
+    <include name='org/voltdb/compiler/TestClusterCompiler.class' />
+    <include name='org/voltdb/compiler/TestDDLCompiler.class' />
+    <include name='org/voltdb/compiler/TestLiveDDLCompiler.class' />
+    <include name='org/voltdb/compiler/TestPartitionDDL.class' />
+    <include name='org/voltdb/compiler/TestProcCompiler.class' />
+    <include name='org/voltdb/compiler/TestVoltCompiler.class' />
+    <include name='org/voltdb/dr2/TestDR2OverReplicationFail.class' />
+    <include name='org/voltdb/dr2/TestDR2PartitionGateway.class' />
+    <include name='org/voltdb/dr2/TestDR2Producer.class' />
+    <include name='org/voltdb/dr2/TestDR2SecondaryRejoin.class' />
+    <include name='org/voltdb/dr2/TestDRConnectionService.class' />
+    <include name='org/voltdb/dr2/TestDRConsumerCoordinator.class' />
+    <include name='org/voltdb/dr2/TestDRConsumerDispatcher.class' />
+    <include name='org/voltdb/dr2/TestDRConsumerReceiveState.class' />
+    <include name='org/voltdb/dr2/TestDRConsumerSyncState.class' />
+    <include name='org/voltdb/dr2/TestDRConsumerTaskUtils.class' />
+    <include name='org/voltdb/dr2/TestDRNormalBufferReceiver.class' />
+    <include name='org/voltdb/dr2/TestDRNormalPartitionBufferReceiver.class' />
+    <include name='org/voltdb/dr2/TestDRSnapshotBufferReceiver.class' />
+    <include name='org/voltdb/dr2/TestDRSnapshotPartitionBufferReceiver.class' />
+    <include name='org/voltdb/dr2/snapshot/TestSyncSnapshotBufferQueue.class' />
+    <include name='org/voltdb/dr2/snapshot/TestSyncSnapshotTimeout.class' />
+    <include name='org/voltdb/dtxn/TestSiteTracker.class' />
+    <include name='org/voltdb/dtxn/TestStoredProcedureErrorTrap.class' />
+    <include name='org/voltdb/export/TestExportDataSource.class' />
+    <include name='org/voltdb/export/TestExportGeneration.class' />
+    <include name='org/voltdb/export/TestExportV2Suite.class' />
+    <include name='org/voltdb/export/TestExportV2SuitePro.class' />
+    <include name='org/voltdb/exportclient/TestJDBCExportClient.class' />
+    <include name='org/voltdb/exportclient/decode/TestEndpointExpander.class' />
+    <include name='org/voltdb/exportclient/decode/TestJsonObjectDecoer.class' />
+    <include name='org/voltdb/exportclient/decode/TestJsonStringDecoder.class' />
+    <include name='org/voltdb/exportclient/decode/TestStringArrayDecoder.class' />
+    <include name='org/voltdb/exportclient/kafka/TestKafkaExportClient.class' />
+    <include name='org/voltdb/groovy/TestGroovyDeployment.class' />
+    <include name='org/voltdb/importer/TestChannelDistributer.class' />
+    <include name='org/voltdb/iv2/TestCartographer.class' />
+    <include name='org/voltdb/iv2/TestLeaderAppointer.class' />
+    <include name='org/voltdb/iv2/TestLeaderCache.class' />
+    <include name='org/voltdb/iv2/TestMpPromoteAlgo.class' />
+    <include name='org/voltdb/iv2/TestMpTransactionState.class' />
+    <include name='org/voltdb/iv2/TestMpTransactionTaskQueue.class' />
+    <include name='org/voltdb/iv2/TestRepairLog.class' />
+    <include name='org/voltdb/iv2/TestUniqueIdGenerator.class' />
+    <include name='org/voltdb/jdbc/TestJDBCDriver.class' />
+    <include name='org/voltdb/utils/TestCommandLine.class' />
+    <include name='org/voltdb/utils/TestCommandLogTracker.class' />
+    <include name='org/voltdb/utils/TestEncoder.class' />
+    <include name='org/voltdb/utils/TestHDFSUtils.class' />
+    <include name='org/voltdb/utils/TestInMemoryJarfile.class' />
+    <include name='org/voltdb/utils/TestJDBCLoader.class' />
+    <include name='org/voltdb/utils/TestSplitSQLStatements.class' />
+    <include name='org/voltdb/utils/TestSqlCmdErrorHandling.class' />
+
+    <!-- Exclude tests -->
+    <patternset refid='junit.exclusions'/>
+</patternset>
+
+<patternset id='junit.other.p2.path'>
+    <!-- Standard junit fileset -->
+    <include name='org/voltcore/agreement/TestAgreementSeeker.class' />
+    <include name='org/voltcore/agreement/TestFuzzMeshArbiter.class' />
+    <include name='org/voltdb/TestAdhocAlterTable.class' />
+    <include name='org/voltdb/TestAdhocCreateTable.class' />
+    <include name='org/voltdb/TestAdhocProcedureRoles.class' />
+    <include name='org/voltdb/TestCLReplayLiveDDLSwitch.class' />
+    <include name='org/voltdb/TestCLReplayStringParam.class' />
+    <include name='org/voltdb/TestClientInterface.class' />
+    <include name='org/voltdb/TestClientInterfaceHandleManager.class' />
+    <include name='org/voltdb/TestCommandLogReplayState.class' />
+    <include name='org/voltdb/TestDefaultDeployment.class' />
+    <include name='org/voltdb/TestEELibraryLoader.class' />
+    <include name='org/voltdb/TestEmptyCatalog.class' />
+    <include name='org/voltdb/TestExpectations.class' />
+    <include name='org/voltdb/TestExportGroups.class' />
+    <include name='org/voltdb/TestExportRejoin.class' />
+    <include name='org/voltdb/TestExportRollback.class' />
+    <include name='org/voltdb/TestExportSnapshot.class' />
+    <include name='org/voltdb/TestExportStatsSuite.class' />
+    <include name='org/voltdb/TestExportSuite.class' />
+    <include name='org/voltdb/TestJavaAssertionsAreOn.class' />
+    <include name='org/voltdb/TestJdbcDatabaseMetaDataGenerator.class' />
+    <include name='org/voltdb/TestLikeQueries.class' />
+    <include name='org/voltdb/TestLiveDDLAfterAutoUpgrade.class' />
+    <include name='org/voltdb/TestLiveDDLSchemaSwitch.class' />
+    <include name='org/voltdb/TestMixedVersionClusters.class' />
+    <include name='org/voltdb/TestRejoinWithCatalogUpdates.class' />
+    <include name='org/voltdb/TestRestoreAgent.class' />
+    <include name='org/voltdb/TestVoltLicense.class' />
+    <include name='org/voltdb/catalog/TestCatalogSerialization.class' />
+    <include name='org/voltdb/catalog/TestDRCatalogDiffs.class' />
+    <include name='org/voltdb/client/TestClientFeatures.class' />
+    <include name='org/voltdb/dr2/TestDR2IdempotencyFilter.class' />
+    <include name='org/voltdb/dr2/TestDR2InvocationBuffer.class' />
+    <include name='org/voltdb/dr2/TestDR2InvocationBufferQueue.class' />
+    <include name='org/voltdb/dr2/TestDR2NewInstanceReplacesOld.class' />
+    <include name='org/voltdb/dr2/snapshot/TestSyncSnapshotResultCollector.class' />
+    <include name='org/voltdb/dtxn/TestNonDetermisticSeppuku.class' />
+    <include name='org/voltdb/export/TestExportSnapshotPreservesSequenceNumber.class' />
+    <include name='org/voltdb/export/TestStreamBlockQueue.class' />
+    <include name='org/voltdb/exportclient/TestElasticSearchHttpExportClient.class' />
+    <include name='org/voltdb/exportclient/TestExportDecoderBase.class' />
+    <include name='org/voltdb/exportclient/TestExportToFileClient.class' />
+    <include name='org/voltdb/exportclient/TestHttpExportClient.class' />
+    <include name='org/voltdb/exportclient/decode/TestEntityDecoders.class' />
+    <include name='org/voltdb/expressions/TestExpressionUtil.class' />
+    <include name='org/voltdb/fullddlfeatures/TestDDLFeatures.class' />
+    <include name='org/voltdb/iv2/TestReplaySequencer.class' />
+    <include name='org/voltdb/iv2/TestSite.class' />
+    <include name='org/voltdb/iv2/TestSpPromoteAlgo.class' />
+    <include name='org/voltdb/iv2/TestSpSchedulerDedupe.class' />
+    <include name='org/voltdb/iv2/TestSpSchedulerSpHandle.class' />
+    <include name='org/voltdb/iv2/TestTransactionTaskQueue.class' />
+    <include name='org/voltdb/iv2/TestTxnEgo.class' />
+    <include name='org/voltdb/jdbc/TestJDBCConnectionFail.class' />
+    <include name='org/voltdb/jdbc/TestJDBCMultiConnection.class' />
+    <include name='org/voltdb/jdbc/TestJDBCMultiNodeConnection.class' />
+    <include name='org/voltdb/jdbc/TestJDBCQueries.class' />
+    <include name='org/voltdb/jdbc/TestJDBCResultSet.class' />
+    <include name='org/voltdb/jdbc/TestJDBCSecurityEnabled.class' />
+    <include name='org/voltdb/jni/TestExecutionEngine.class' />
+    <include name='org/voltdb/jni/TestFragmentProgressUpdate.class' />
+    <include name='org/voltdb/join/TestDataMigrationSnapshotPlanner.class' />
+    <include name='org/voltdb/join/TestElasticJoinUtils.class' />
+    <include name='org/voltdb/messaging/TestVoltMessageSerialization.class' />
+    <include name='org/voltdb/planner/TestAdHocPlans.class' />
+    <include name='org/voltdb/planner/TestDeterminism.class' />
+    <include name='org/voltdb/planner/TestIndexSelection.class' />
+    <include name='org/voltdb/planner/TestMultipleOuterJoinPlans.class' />
+    <include name='org/voltdb/planner/TestPlannerTool.class' />
+    <include name='org/voltdb/planner/TestPlansCount.class' />
+    <include name='org/voltdb/planner/TestPlansGroupBy.class' />
+    <include name='org/voltdb/planner/TestPlansJoin.class' />
+    <include name='org/voltdb/planner/TestPlansMatView.class' />
+    <include name='org/voltdb/planner/TestPlansScalarSubQueries.class' />
+    <include name='org/voltdb/planner/TestPlansTPCC.class' />
+    <include name='org/voltdb/planner/TestPushDownAggregates.class' />
+    <include name='org/voltdb/planner/TestSelfJoins.class' />
+    <include name='org/voltdb/planner/TestVerbotenPlans.class' />
+    <include name='org/voltdb/plannodes/TestNestLoopPlanNode.class' />
+    <include name='org/voltdb/rejoin/TestIv2RejoinCoordinator.class' />
+    <include name='org/voltdb/rejoin/TestPauselessRejoinEndToEnd.class' />
+    <include name='org/voltdb/utils/TestCSVLoaderCommandLoggingMP.class' />
+    <include name='org/voltdb/utils/TestCollector.class' />
+    <include name='org/voltdb/utils/TestMiscUtils.class' />
+    <include name='org/voltdb/utils/TestSQLLexer.class' />
+    <include name='org/voltdb/utils/TestSegmentPool.class' />
+    <include name='org/voltdb/utils/TestSqlCmdInterface.class' />
+    <include name='org/voltdb/utils/TestSqlCommandParserInteractive.class' />
+    <include name='org/voltdb/utils/TestVoltBulkLoader.class' />
+
+    <!-- Exclude tests -->
+    <patternset refid='junit.exclusions'/>
+</patternset>
+
+<patternset id='junit.other.p3.path'>
+    <!-- Standard junit fileset -->
+    <patternset refid="junit.all.path" />
+
+    <!-- Exclude tests -->
+    <patternset refid="junit.exclude.regression.path"/>
+    <invert>
+        <patternset refid="junit.other.p1.path"/>
+        <patternset refid="junit.other.p2.path"/>
+    </invert>
 </patternset>
 
 <!-- Workload Tracer Properties -->
@@ -233,19 +546,20 @@ PRIMARY ENTRY POINTS
 -->
 
 <target name="default"
-    depends="compile, ee, voltdb.jar, voltdbclient.jar"
+    depends="compile, ee, voltdb.jar, voltdbclient.jar, importbundles"
     description="Compile Java classes and C++ JNI library."
 />
 <target name="check"
     depends="licensecheck, default, voltdbipc"
     description="Run Java and C++ JNI testcases." >
-    <condition property="timeoutLength" value="${timeoutLength}" else='1800000'>
+    <condition property="timeoutLength" value="${timeoutLength}" else='18000000'>
         <isset property="timeoutLength"/>
     </condition>
 
-    <exec executable="ant" failonerror="true" timeout="9000000">
+    <exec executable="ant" failonerror="true" timeout="18000000">
         <arg value="eecheck" />
         <arg value="junit" />
+        <arg value="sqlcmdtest" />
         <arg value="distcheck" />
         <arg value="pythonfser" />
         <arg value="-Dbuild=${build}" />
@@ -257,11 +571,11 @@ PRIMARY ENTRY POINTS
 <target name="check_noclustering"
     depends="licensecheck, compile, voltdbipc"
     description="Run Java and C++ JNI testcases that apply to a single node." >
-    <condition property="timeoutLength" value="${timeoutLength}" else='1800000'>
+    <condition property="timeoutLength" value="${timeoutLength}" else='18000000'>
         <isset property="timeoutLength"/>
     </condition>
 
-    <exec executable="ant" failonerror="true" timeout="9000000">
+    <exec executable="ant" failonerror="true" timeout="18000000">
         <arg value="eecheck" />
         <arg value="junit_noclustering" />
         <arg value="distcheck" />
@@ -291,21 +605,17 @@ PRIMARY ENTRY POINTS
 </target>
 
 <target name="check_sql"
-    depends="licensecheck, compile, voltdbipc"
+    depends="licensecheck, compile, voltdbipc, eecheck"
     description="Run Java and C++ JNI testcases stressing sql functionality over process architecture." >
-    <condition property="timeoutLength" value="${timeoutLength}" else='1800000'>
+    <condition property="timeoutLength" value="${timeoutLength}" else='9000000'>
         <isset property="timeoutLength"/>
     </condition>
 
     <exec executable="ant" failonerror="true" timeout="9000000">
-        <arg value="eecheck" />
         <arg value="junit_sql" />
-        <arg value="distcheck" />
-        <arg value="pythonfser" />
         <arg value="-Dbuild=${build}" />
         <arg value="-DtimeoutLength=${timeoutLength}" />
         <arg value="-DVOLT_REGRESSIONS=${VOLT_REGRESSIONS}" />
-        <arg value="-DVOLT_ENABLEIV2=${VOLT_ENABLEIV2}" />
     </exec>
 </target>
 
@@ -337,7 +647,7 @@ PRIMARY ENTRY POINTS
     description="Do all tasks."
 />
 <target name="jars"
-    depends="voltdb.jar, voltdbfat.jar, voltdbclient.jar"
+    depends="voltdb.jar, voltdbfat.jar, voltdbclient.jar, importbundles"
     description="Create production JAR files."
 />
 <target name="dist"
@@ -427,6 +737,9 @@ DISTRIBUTION
             <include name="src/frontend/org/voltdb/SQLStmt.java" />
             <include name="src/frontend/org/voltdb/VoltType.java" />
             <include name="src/frontend/org/voltdb/ProcInfo.java" />
+            <include name="src/frontend/org/voltdb/importer/AbstractImporter.java" />
+            <include name="src/frontend/org/voltdb/importer/AbstractImporterFactory.java" />
+            <include name="src/frontend/org/voltdb/importer/ImporterConfig.java" />
             <include name="src/frontend/org/voltdb/types/TimestampType.java" />
         </fileset>
     </javadoc>
@@ -439,7 +752,7 @@ DISTRIBUTION
 
 <!-- dist_internal_core populates the core distribution components needed by all
      distributions except tools. -->
-<target name="dist_internal_core" depends="compile, ee, javadoc, voltdb.jar, voltdbclient.jar, bindoc">
+<target name="dist_internal_core" depends="compile, ee, javadoc, voltdb.jar, voltdbclient.jar, importbundles, bindoc">
     <!-- prepare release directory for new content -->
     <delete includeemptydirs="true" failonerror='false'>
         <fileset dir="${dist.dir}" includes="**/*" />
@@ -458,6 +771,7 @@ DISTRIBUTION
             <exclude name=".gitignore"/>
             <exclude name="lib/python" />
             <exclude name="doc/tutorials/**" />
+            <exclude name="voltdb/libvoltdb*" />
         </fileset>
     </copy>
 
@@ -469,16 +783,6 @@ DISTRIBUTION
         <fileset dir="voltdb" defaultexcludes="yes">
             <include name="voltdbclient-${dist.version}.jar" />
             <include name="voltdbclient-${dist.version}-javadoc.jar" />
-        </fileset>
-    </copy>
-    <copy todir="${dist.dir}/voltdb" flatten="true" >
-        <fileset dir="${build.dir}" defaultexcludes="yes">
-            <include name="nativelibs/libvoltdb*" />
-        </fileset>
-    </copy>
-    <copy todir="${dist.dir}/voltdb" flatten="true" >
-        <fileset dir="." defaultexcludes="yes">
-            <include name="third_party/cpp/jnilib/libjzmq*" />
         </fileset>
     </copy>
 
@@ -504,9 +808,6 @@ DISTRIBUTION
         </fileset>
     </copy>
 
-    <!-- OS-specific preparation of libvoltdb* -->
-    <antcall target="dist_libvoltdb" />
-
     <!-- copy license to voltdb dir -->
     <copy todir="${dist.dir}/voltdb" file="LICENSE"/>
 
@@ -516,11 +817,18 @@ DISTRIBUTION
      populates the core components used by the client distribution. -->
 <target name="dist_internal" depends="dist_internal_core">
 
-	<!-- build the jars for the clients -->
-	<exec dir='examples/voter' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
-	<!--<exec dir='examples/voltkv' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
-	<exec dir='examples/windowing' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
-	<exec dir='examples/json' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>-->
+    <!-- build the jars for the clients -->
+    <exec dir='examples/voter' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
+    <exec dir='examples/voltkv' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
+    <exec dir='examples/windowing' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
+    <exec dir='examples/windowing-with-ddl' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
+    <exec dir='examples/json-sessions' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
+    <exec dir='examples/uniquedevices' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
+
+    <!-- build the jars for the tutorials -->
+    <exec dir='doc/tutorials/helloworld' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
+    <exec dir='doc/tutorials/helloworldrevisited' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
+    <exec dir='doc/tutorials/auction' executable='/usr/bin/env'><arg line="bash run.sh jars"/></exec>
 
     <!-- populate the stuff not handled by dist_internal_core -->
     <copy todir="${dist.dir}/">
@@ -594,7 +902,6 @@ DISTRIBUTION
             <include name="bin/sqlcmd"/>
             <exclude name="voltdb/libvoltdb*"/>
             <exclude name="voltdb/voltdb-*.jar"/>
-            <exclude name="voltdb/libjzmq*"/>
         </fileset>
     </copy>
 
@@ -606,6 +913,10 @@ DISTRIBUTION
             <include name="examples/voltcache/run.sh"/>
             <include name="examples/voltkv/run.sh"/>
             <include name="examples/voter/run.sh"/>
+            <include name="examples/json-sessions/run.sh"/>
+            <include name="examples/windowing/run.sh"/>
+            <include name="examples/windowing-with-ddl/run.sh"/>
+            <include name="examples/uniquedevices/run.sh"/>
             <include name="bin/sqlcmd"/>
         </fileset>
     </chmod>
@@ -630,35 +941,75 @@ DISTRIBUTION
     </exec>
 </target>
 
+<target name="prep_libvoltdb">
+    <copy todir='voltdb' overwrite="true">
+        <fileset dir="${build.dir}/nativelibs">
+            <include name="libvoltdb-${dist.version}.*"/>
+        </fileset>
+    </copy>
+
+   <condition property="isDebug">
+       <equals arg1="${build}" arg2="debug"/>
+   </condition>
+
+    <antcall target="call_strip_lib" />
+
+    <!-- copy to dir where jar picks it up as well -->
+    <condition property="jar.nativelib.dir"
+        value="${build.prod.dir}/org/voltdb/native/Mac/x86_64"
+        else="${build.prod.dir}/org/voltdb/native/Linux/x86_64">
+        <isset property="os.mac"/>
+    </condition>
+
+    <copy todir="${jar.nativelib.dir}">
+        <fileset dir="${base.dir}/voltdb">
+            <include name="libvoltdb*" />
+        </fileset>
+    </copy>
+
+    <!-- Call shell script that handles copying native libs so they can be packaged together -->
+    <exec dir='.' executable="/usr/bin/env" failonerror='true'>
+        <arg value='bash' />
+        <arg value='tools/copy-lib.sh'/>
+        <arg value='${build.prod.dir}/org/voltdb/native/Mac/x86_64' />
+        <arg value='${dist.version}'/>
+        <arg value='${kitbuild}'/>
+    </exec>
+</target>
+
+<target name="call_strip_lib" unless="isDebug">
+    <antcall target="strip_libvoltdb" />
+</target>
+
 <!-- Prepare libvoltdb* for distribution. -->
-<target name="dist_libvoltdb" depends="dist_libvoltdb_linux, dist_libvoltdb_mac" />
+<target name="strip_libvoltdb" depends="strip_libvoltdb_linux, strip_libvoltdb_mac" />
 
 <!-- Linux prepare libvoltdb* for distribution. -->
-<target name="dist_libvoltdb_linux" unless="os.mac">
+<target name="strip_libvoltdb_linux" unless="os.mac">
 
     <!-- save the symbols from the shared library -->
-    <exec dir='${dist.dir}/voltdb' executable='/bin/sh'>
+    <exec dir='${base.dir}/voltdb' executable='/bin/sh'>
         <arg line="-c '/usr/bin/objcopy --only-keep-debug libvoltdb-${dist.version}.so ${build.dir}/voltdb-${dist.version}.sym'" />
     </exec>
 
     <!-- strip the voltbin shared library (~40x size reduction) -->
-    <exec dir='${dist.dir}/voltdb' executable='/bin/sh'>
+    <exec dir='${base.dir}/voltdb' executable='/bin/sh'>
         <arg line="-c '/usr/bin/strip --strip-debug --strip-unneeded libvoltdb*'"/>
     </exec>
 
     <!-- embed the path to the symbol file into the ELF binary -->
-    <exec dir='${dist.dir}/voltdb' executable='/bin/sh'>
+    <exec dir='${base.dir}/voltdb' executable='/bin/sh'>
         <arg line="-c '/usr/bin/objcopy --add-gnu-debuglink=voltdb-${dist.version}.sym libvoltdb-${dist.version}.so'" />
     </exec>
 
 </target>
 
 <!-- Mac prepare libvoltdb* for distribution. -->
-<target name="dist_libvoltdb_mac" if="os.mac">
+<target name="strip_libvoltdb_mac" if="os.mac">
     <!-- objcopy is unavailable by default on Mac -->
 
     <!-- Just use strip -S since strip-unneeded option is unavailable. -->
-    <exec dir='${dist.dir}/voltdb' executable='/bin/sh'>
+    <exec dir='${base.dir}/voltdb' executable='/bin/sh'>
         <arg line="-c '/usr/bin/strip -S libvoltdb*'"/>
     </exec>
 </target>
@@ -706,16 +1057,22 @@ CLEANING
 -->
 
 <target name='clean'
-	description="Remove all compiled and generated files."
-	depends="cleantmp, clean_client, clean_project_gen, clean_deployment_gen,
-	         clean_debian_package, clean_rpm_package, clean_bindoc, clean_other_gen">
+    description="Remove all compiled and generated files."
+    depends="cleantmp, clean_client, clean_project_gen, clean_deployment_gen,
+             clean_debian_package, clean_rpm_package, clean_bindoc, clean_other_gen">
   <exec dir='examples/voter' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
   <exec dir='examples/json-sessions' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
   <exec dir='examples/windowing' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
+  <exec dir='examples/windowing-with-ddl' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
+  <exec dir='examples/uniquedevices' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
   <exec dir='examples/voltkv' executable='/usr/bin/env'><arg line="bash run.sh cleanall"/></exec>
   <exec dir='doc/tutorials/auction' executable='/usr/bin/env'><arg line="bash run.sh clean"/></exec>
+  <exec dir='doc/tutorials/helloworldrevisited' executable='/usr/bin/env'><arg line="bash run.sh clean"/></exec>
   <exec dir='doc/tutorials/helloworld' executable='/usr/bin/env'><arg line="bash run.sh clean"/></exec>  <exec dir='.' executable='/bin/sh'>
     <arg line="-c 'rm -rf obj/*'"/>
+  </exec>
+  <exec dir='.' executable='/bin/sh'>
+    <arg line="-c 'rm -rf bundles/*.jar'"/>
   </exec>
   <exec dir='.' executable='/bin/sh'>
     <arg line="-c 'rm -rf voltdb/*.jar'"/>
@@ -783,7 +1140,8 @@ JAR BUILDING
   </exec>
 </target>
 
-<target name="voltdb.jar" depends="compile, buildinfo">
+<target name="voltdb.jar" depends="compile, ee, buildinfo">
+
     <jar destfile="voltdb/voltdb-${dist.version}.jar" duplicate="preserve">
         <fileset dir="${build.client.dir}" defaultexcludes="yes">
             <include name="**"/>
@@ -802,7 +1160,7 @@ JAR BUILDING
             <include name="au/com/bytecode/opencsv_voltpatches/**" />
             <include name="org/cliffc_voltpatches/**" />
             <include name="groovy_voltpatches/**"/>
-	    <include name="org/supercsv_voltpatches/tokenizer/*" />
+            <include name="org/supercsv_voltpatches/tokenizer/*" />
             <include name="org/hsqldb_voltpatches/**" />
             <include name="org/json_voltpatches/**" />
             <include name="org/HdrHistogram_voltpatches/**" />
@@ -870,6 +1228,11 @@ JAR BUILDING
 
 <target name="voltdbclient.jar" depends="compile, buildinfo">
     <ant antfile="build-client.xml" target="voltdbclient.jar" inheritAll="false">
+        <property name="build" value="${build}"/>
+    </ant>
+</target>
+<target name="importbundles" depends="compile, buildinfo">
+    <ant antfile="build-importers.xml" target="buildbundles" inheritAll="false">
         <property name="build" value="${build}"/>
     </ant>
 </target>
@@ -1026,13 +1389,6 @@ JAVA COMPILATION
         </fileset>
     </copy>
 
-    <!-- copy zmq to voltdb dir / would be nice to only copy the right one -->
-    <copy todir="voltdb" flatten="true" >
-        <fileset dir="." defaultexcludes="yes">
-            <include name="third_party/cpp/jnilib/libjzmq*" />
-        </fileset>
-    </copy>
-
     <!-- compile the individual source directories -->
     <!-- hsql -->
     <invoke-javac srcdir="${src.hsqldb.dir}"/>
@@ -1048,7 +1404,7 @@ JAVA COMPILATION
                   com/google_voltpatches/**/*.java
                   org/cliffc_voltpatches/**
                   groovy_voltpatches/**
-		  org/supercsv_voltpatches/tokenizer/*.java"/>
+                  org/supercsv_voltpatches/tokenizer/*.java"/>
     <!-- non-voltcore voltdb code -->
     <invoke-javac srcdir="${src.gpl.dir}" excludes="org/voltcore/**/*.java" />
 
@@ -1159,6 +1515,7 @@ NATIVE EE STUFF
     <exec dir='.' executable='python' failonerror='true'>
         <env key="TEST_DIR" value="${build.testobjects.dir}" />
         <env key="EETESTSUITE" value="${eetestsuite}"/>
+        <env key="VOLT_LOG_LEVEL" value="${VOLT_LOG_LEVEL}"/>
         <arg line="build.py ${build} test" />
     </exec>
 </target>
@@ -1168,6 +1525,7 @@ NATIVE EE STUFF
     <exec dir='.' executable='python' failonerror='true'>
         <env key="TEST_DIR" value="${build.testobjects.dir}" />
         <env key="EETESTSUITE" value="${eetestsuite}"/>
+        <env key="VOLT_LOG_LEVEL" value="${VOLT_LOG_LEVEL}"/>
         <arg line="build.py ${build} build" />
     </exec>
 </target>
@@ -1175,6 +1533,7 @@ NATIVE EE STUFF
 <target name='voltdbipc' depends="ee"
     description="Build the IPC client.">
     <exec dir='.' executable='python' failonerror='true'>
+        <env key="VOLT_LOG_LEVEL" value="${VOLT_LOG_LEVEL}"/>
         <arg line="build.py ${build} voltdbipc" />
     </exec>
 </target>
@@ -1182,14 +1541,11 @@ NATIVE EE STUFF
 <target name='ee' depends="ee_buildmakefile, catalog, jnicompile, buildinfo"
     description="Build C++ JNI library and copy it to production folder.">
     <exec dir='.' executable='python' failonerror='true'>
+        <env key="VOLT_LOG_LEVEL" value="${VOLT_LOG_LEVEL}"/>
         <env key="EESKIPBUILDMAKEFILE" value="true" />
         <arg line="build.py ${build}" />
     </exec>
-    <copy todir='voltdb'>
-        <fileset dir="${build.dir}/nativelibs">
-            <include name="libvoltdb-${dist.version}.*"/>
-        </fileset>
-    </copy>
+    <antcall target="prep_libvoltdb"/>
 </target>
 
 <target name='ee_makefile.uptodate'>
@@ -1213,6 +1569,7 @@ NATIVE EE STUFF
     description="Just make the makefile for the C++ JNI library.">
     <exec dir='.' executable='python' failonerror='true'>
         <env key="EEONLYBUILDMAKEFILE" value="true"/>
+        <env key="VOLT_LOG_LEVEL" value="${VOLT_LOG_LEVEL}"/>
         <arg line="build.py ${build}" />
     </exec>
 </target>
@@ -1220,18 +1577,16 @@ NATIVE EE STUFF
 <target name='recompile_ee_nodepends'
     description="Build C++ JNI library and copy it to production folder.">
     <exec dir='.' executable='python' failonerror='true'>
+        <env key="VOLT_LOG_LEVEL" value="${VOLT_LOG_LEVEL}"/>
         <arg line="build.py ${build}" />
     </exec>
-    <copy todir='voltdb'>
-        <fileset dir="${build.dir}/nativelibs">
-            <include name="libvoltdb-${dist.version}.*"/>
-        </fileset>
-    </copy>
+    <antcall target="prep_libvoltdb"/>
 </target>
 
 <target name='ee_profile' depends="catalog, jnicompile"
     description="Build C++ JNI lib dl-ing perf tools and copy it to production folder.">
     <exec dir='.' executable='python' failonerror='true'>
+        <env key="VOLT_LOG_LEVEL" value="${VOLT_LOG_LEVEL}"/>
         <arg line="build.py ${build} profile" />
     </exec>
 </target>
@@ -1239,6 +1594,7 @@ NATIVE EE STUFF
 <target name='execplanfrag' depends="ee"
         description="Create test program that loads catalog and tables and executes a plan fragment.">
     <exec dir='.' executable='python' failonerror='true'>
+        <env key="VOLT_LOG_LEVEL" value="${VOLT_LOG_LEVEL}"/>
         <arg line="build.py EXECPLANFRAG ${build}" />
     </exec>
 </target>
@@ -1268,8 +1624,7 @@ TEST CASES
     <property name="build.dir.suffix" value="" /> <!-- Default -->
     <property name='classpath' refid='project.classpath' />
     <property name='echoserver.command' value="java
-    -Djava.library.path=${build.dir}${build.dir.suffix}/nativelibs -classpath
-    ${classpath} -server -Xmx256m -ea
+    -classpath ${classpath} -server -Xmx256m -ea
     org.voltdb.messaging.EchoServer" />
     <exec dir='tests/scripts/' executable='python' failonerror='true'>
         <arg line="Testvoltdbclient.py"/>
@@ -1338,9 +1693,12 @@ TEST CASES
             showoutput="${junit.showoutput}"
         >
             <classpath refid='project.classpath' />
-            <jvmarg value="-Djava.library.path=${build.dir}/nativelibs:${base.dir}/third_party/cpp/jnilib" />
             <jvmarg value="-server" />
-            <jvmarg value="-Xcheck:jni" />
+            <!-- Following option is commented out because
+                 it introduces enough overhead to JNI calls
+                 that some tests time out with Java 8.
+                 See ENG-8730. -->
+            <!-- <jvmarg value="-Xcheck:jni" /> -->
             <jvmarg value="-Xmx256m"/>
             <jvmarg value="-XX:+HeapDumpOnOutOfMemoryError"/>
             <jvmarg value="-XX:-UseSplitVerifier"/>
@@ -1448,6 +1806,7 @@ TEST CASES
     </run_junit>
 </target>
 
+<!-- 4 old JUnit targets which will be deprecated after Docker deployed in testing -->
 <target name="junit_regression"
     description="Execute JUnit regression test suites.">
     <run_junit>
@@ -1494,7 +1853,74 @@ TEST CASES
     </run_junit>
 </target>
 
-<!-- common macro to run a bynch of junit -->
+<!-- 6 new targets which will be used after Docker deployed in testing -->
+<target name="junit_regression_p1"
+    description="Execute part 1 of JUnit regression test suites.">
+    <run_junit>
+        <tests>
+            <fileset dir='${build.test.dir}'>
+                <patternset refid="junit.regression.p1.path" />
+            </fileset>
+        </tests>
+    </run_junit>
+</target>
+
+<target name="junit_regression_p2"
+    description="Execute part 2 of JUnit regression test suites.">
+    <run_junit>
+        <tests>
+            <fileset dir='${build.test.dir}'>
+                <patternset refid="junit.regression.p2.path" />
+            </fileset>
+        </tests>
+    </run_junit>
+</target>
+
+<target name="junit_regression_p3"
+    description="Execute part 3 of JUnit regression test suites.">
+    <run_junit>
+        <tests>
+            <fileset dir='${build.test.dir}'>
+                <patternset refid="junit.regression.p3.path" />
+            </fileset>
+        </tests>
+    </run_junit>
+</target>
+
+<target name="junit_other_p1"
+    description="Execute part 1 of other JUnit test suites.">
+    <run_junit>
+        <tests>
+            <fileset dir='${build.test.dir}'>
+                <patternset refid="junit.other.p1.path" />
+            </fileset>
+        </tests>
+    </run_junit>
+</target>
+
+<target name="junit_other_p2"
+    description="Execute part 2 of other JUnit test suites.">
+    <run_junit>
+        <tests>
+            <fileset dir='${build.test.dir}'>
+                <patternset refid="junit.other.p2.path" />
+            </fileset>
+        </tests>
+    </run_junit>
+</target>
+
+<target name="junit_other_p3"
+    description="Execute part 3 of other JUnit test suites.">
+    <run_junit>
+        <tests>
+            <fileset dir='${build.test.dir}'>
+                <patternset refid="junit.other.p3.path" />
+            </fileset>
+        </tests>
+    </run_junit>
+</target>
+
+<!-- common macro to run a bunch of junit -->
 <macrodef name='run_junit'>
     <element name='tests'/>
     <sequential>
@@ -1549,6 +1975,7 @@ TEST CASES
                 <exclude name="**/TestMaliciousClientSuite.class" />
                 <exclude name="org/voltdb/quarantine/**/*.class"/>
                 <exclude name="**/TestExportBase.class"/>
+                <exclude name="**/TestExportBaseSocketExport.class"/>
                 <exclude name="**/TestPauselessRejoinFuzz.class" /> <!-- regressed during 3.0 bugfix? -->
             </fileset>
         </tests>
@@ -1648,6 +2075,7 @@ TEST CASES
   <!-- Generate instrumented objects -->
   <!-- Whether any work needs doing is left to the C++ makefile -->
   <exec dir='.' executable='python' failonerror='true'>
+    <env key="VOLT_LOG_LEVEL" value="${VOLT_LOG_LEVEL}"/>
     <arg line="build.py ${build} coverage" />
   </exec>
   <mkdir dir="${lcov.dir}" />
@@ -1709,6 +2137,7 @@ TEST CASES
     description="Run C++ unit tests from the coverage directory">
     <exec dir='.' executable='python' failonerror='true'>
         <env key="TEST_DIR" value="${build.dir}-coverage/testobjects" />
+        <env key="VOLT_LOG_LEVEL" value="${VOLT_LOG_LEVEL}"/>
         <arg line="build.py ${build} test coverage" />
     </exec>
 </target>
@@ -1835,6 +2264,10 @@ TEST CASES
     <samplecheck app="json-sessions" />
     <echo>checking windowing</echo>
     <samplecheck app="windowing" />
+    <echo>checking windowing-with-ddl</echo>
+    <samplecheck app="windowing-with-ddl" />
+    <echo>checking uniquedevices</echo>
+    <samplecheck app="uniquedevices" />
 </target>
 
 <target name='sqlcoverage' depends="ee,compile"
@@ -1864,6 +2297,12 @@ TEST CASES
     </condition>
     <condition property="config_config" value="-c ${sql_coverage_config}" else="">
         <isset property="sql_coverage_config"/>
+    </condition>
+    <condition property="config_postgresql" value="-P" else="">
+        <isset property="postgresql"/>
+    </condition>
+    <condition property="config_ascii_only" value="-a" else="">
+        <isset property="ascii_only"/>
     </condition>
     <condition property="config_verbose" value="-r" else="">
         <isset property="sql_coverage_verbose"/>
@@ -1900,8 +2339,8 @@ TEST CASES
     </condition>
     <property name='classpath' refid='project.classpath' />
     <property name='simpleserver.command' value='java
-    -Djava.library.path=${build.dir}${build.dir.suffix}/nativelibs -classpath
-    ${classpath} -Dlog4j.configuration=file://${log4j.configuration} -server -XX:+HeapDumpOnOutOfMemoryError -Xmx640m -XX:+AggressiveOpts -ea
+    -classpath ${classpath}
+    -Dlog4j.configuration=file://${log4j.configuration} -server -XX:+HeapDumpOnOutOfMemoryError -Xmx640m -XX:+AggressiveOpts -ea
     org.voltdb.sqlgenerator.SimpleServer create hosts=${hosts}
     sitesperhost=${sitesperhost} replicas=${replicas}
     ' />
@@ -1922,6 +2361,8 @@ TEST CASES
         <arg line='sql_coverage_test.py' />
         <arg line="${config_seed}" />
         <arg line="${config_config}" />
+        <arg line="${config_postgresql}" />
+        <arg line="${config_ascii_only}" />
         <arg line="${config_verbose}" />
         <arg file="${config_suite}" />
         <arg file="${sqlcov.dir}" />
@@ -1955,7 +2396,10 @@ TEST CASES
     <class location="voltdb/voltdb-${dist.version}.jar" />
     <auxClasspath>
       <fileset dir="${lib.dir}" includes ="*.jar" />
-      <fileset dir="${vendor.lib.dir}" includes="*.jar" />
+      <fileset dir='${vendor.lib.dir}'>
+          <include name='*.jar' />
+          <exclude name='classes-java1.6.jar' />
+      </fileset>
       <pathelement location="${build.test.dir}" />
       <fileset refid="voltpro.classpath"/>
     </auxClasspath>
@@ -2026,6 +2470,51 @@ TEST CASES
     </java>
 </target>
 
+<target name="sqlcmdtest" depends='default' description="Test sqlcmd via scripts">
+    <property name="sqlcmdtest.dir" value="tests/sqlcmd"/>
+    <echo message="Running from ${sqlcmdtest.dir}"/>
+
+    <!-- build the jar file used to test the load and remove commands -->
+    <exec dir='${sqlcmdtest.dir}' executable='/usr/bin/env'><arg line="bash build_jar.sh"/></exec>
+
+    <condition property="user" value="${env.USER}" else="anonymous">
+        <isset property="env.USER"/>
+    </condition>
+    <condition property="workpath" value="${workpath}" else="/tmp/${user}/sqlcmdtest/">
+        <isset property="workpath"/>
+    </condition>
+    <condition property="reportpath" value="${reportpath}" else="reports/">
+        <isset property="reportpath"/>
+    </condition>
+
+    <exec dir='${sqlcmdtest.dir}' executable='python2.6' failonerror="true">
+        <arg value='sqlcmdtest.py' />
+    </exec>
+</target>
+
+<target name="sqlcmdtestrefresh" depends='default' description="Reset result baselines for sqlcmd test scripts">
+    <property name="sqlcmdtest.dir" value="tests/sqlcmd"/>
+    <echo message="Running from ${sqlcmdtest.dir}"/>
+
+    <!-- build the jar file used to test the load and remove commands -->
+    <exec dir='${sqlcmdtest.dir}' executable='/usr/bin/env'><arg line="bash build_jar.sh"/></exec>
+
+    <condition property="user" value="${env.USER}" else="anonymous">
+        <isset property="env.USER"/>
+    </condition>
+    <condition property="workpath" value="${workpath}" else="/tmp/${user}/sqlcmdtest/">
+        <isset property="workpath"/>
+    </condition>
+    <condition property="reportpath" value="${reportpath}" else="reports/">
+        <isset property="reportpath"/>
+    </condition>
+
+    <exec dir='${sqlcmdtest.dir}' executable='python2.6' failonerror="true">
+        <arg value='sqlcmdtest.py' />
+        <arg value='--refresh' />
+    </exec>
+</target>
+
 <!--
 ***************************************
 BENCHMARKS
@@ -2037,7 +2526,6 @@ BENCHMARKS
     <java fork="true" failonerror="true"
         classname="org.voltdb.ProcedureCallMicrobench" >
         <arg value='${clients}' />
-        <jvmarg value="-Djava.library.path=${build.dir}/nativelibs" />
         <jvmarg value="-server" />
         <jvmarg value="-Xmx512m" />
         <classpath refid='project.classpath' />

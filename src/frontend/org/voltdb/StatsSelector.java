@@ -36,15 +36,23 @@ public enum StatsSelector {
     PROCEDUREOUTPUT,
 
     /*
-     * DRPARTITION and DRNODE are internal names
-     * Externally the selector is just "DR"
+     * DRPRODUCERPARTITION and DRPRODUCERNODE are internal names
+     * Externally the selector is "DRPRODUCER", or just "DR"
      */
     DR,
-    DRPARTITION,
-    DRNODE,
+    DRPRODUCER,
+    DRPRODUCERPARTITION,
+    DRPRODUCERNODE,
+
+    DRCONSUMER,
+    DRCONSUMERNODE,
+    DRCONSUMERPARTITION,
 
     TOPO,           // return leader and site info for iv2
     REBALANCE,      // return elastic rebalance progress
-    KSAFETY,         // return ksafety coverage information
-    CPU // Return CPU Stats
+    KSAFETY,        // return ksafety coverage information
+    CPU,            // Return CPU Stats
+
+    COMMANDLOG,     // return number of outstanding bytes and txns on this node
+    IMPORTER
 }

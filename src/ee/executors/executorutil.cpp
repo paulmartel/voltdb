@@ -50,13 +50,13 @@
 
 #include "executors/aggregateexecutor.h"
 #include "executors/deleteexecutor.h"
-#include "executors/indexscanexecutor.h"
 #include "executors/indexcountexecutor.h"
-#include "executors/tablecountexecutor.h"
+#include "executors/indexscanexecutor.h"
 #include "executors/insertexecutor.h"
 #include "executors/limitexecutor.h"
-#include "executors/materializeexecutor.h"
 #include "executors/materializedscanexecutor.h"
+#include "executors/materializeexecutor.h"
+#include "executors/mergereceiveexecutor.h"
 #include "executors/nestloopexecutor.h"
 #include "executors/nestloopindexexecutor.h"
 #include "executors/orderbyexecutor.h"
@@ -64,6 +64,8 @@
 #include "executors/receiveexecutor.h"
 #include "executors/sendexecutor.h"
 #include "executors/seqscanexecutor.h"
+#include "executors/tablecountexecutor.h"
+#include "executors/tuplescanexecutor.h"
 #include "executors/unionexecutor.h"
 #include "executors/updateexecutor.h"
 
@@ -93,9 +95,11 @@ AbstractExecutor* getNewExecutor(VoltDBEngine *engine,
     case PLAN_NODE_TYPE_ORDERBY: return new OrderByExecutor(engine, abstract_node);
     case PLAN_NODE_TYPE_PROJECTION: return new ProjectionExecutor(engine, abstract_node);
     case PLAN_NODE_TYPE_RECEIVE: return new ReceiveExecutor(engine, abstract_node);
+    case PLAN_NODE_TYPE_MERGERECEIVE: return new MergeReceiveExecutor(engine, abstract_node);
     case PLAN_NODE_TYPE_SEND: return new SendExecutor(engine, abstract_node);
     case PLAN_NODE_TYPE_SEQSCAN: return new SeqScanExecutor(engine, abstract_node);
     case PLAN_NODE_TYPE_TABLECOUNT: return new TableCountExecutor(engine, abstract_node);
+    case PLAN_NODE_TYPE_TUPLESCAN: return new TupleScanExecutor(engine, abstract_node);
     case PLAN_NODE_TYPE_UNION: return new UnionExecutor(engine, abstract_node);
     case PLAN_NODE_TYPE_UPDATE: return new UpdateExecutor(engine, abstract_node);
     // default: Don't provide a default, let the compiler enforce complete coverage.

@@ -45,9 +45,6 @@
 
 #ifndef HSTORETABLE_H
 #define HSTORETABLE_H
-#ifndef BTREE_DEBUG
-#define BTREE_DEBUG
-#endif
 #include <string>
 #include <vector>
 #include <set>
@@ -62,7 +59,7 @@
 #include "common/tabletuple.h"
 #include "common/TheHashinator.h"
 #include "storage/TupleBlock.h"
-#include "stx/btree_set.h"
+#include "storage/ExportTupleStream.h"
 #include "common/ThreadLocalPool.h"
 
 namespace voltdb {
@@ -245,7 +242,10 @@ class Table {
     // SERIALIZATION
     // ------------------------------------------------------------------
     int getApproximateSizeToSerialize() const;
+    size_t getColumnHeaderSizeToSerialize(bool includeTotalSize) const;
+    size_t getAccurateSizeToSerialize(bool includeTotalSize);
     bool serializeTo(SerializeOutput &serialize_out);
+    bool serializeToWithoutTotalSize(SerializeOutput &serialize_io);
     bool serializeColumnHeaderTo(SerializeOutput &serialize_io);
 
     /*
@@ -387,7 +387,7 @@ protected:
         return allocatedTupleCount() - activeTupleCount() > std::max(static_cast<int64_t>((m_tuplesPerBlock * 3)), (allocatedTupleCount() * (100 - m_compactionThreshold)) / 100);  /* using the integer percentage */
     }
 
-    void initializeWithColumns(TupleSchema *schema, const std::vector<std::string> &columnNames, bool ownsTupleSchema, int32_t compactionThreshold = 95);
+    virtual void initializeWithColumns(TupleSchema *schema, const std::vector<std::string> &columnNames, bool ownsTupleSchema, int32_t compactionThreshold = 95);
 
     // per table-type initialization
     virtual void onSetColumns() {
@@ -438,4 +438,4 @@ protected:
 };
 
 }
-#endif
+#endif // HSTORETABLE_H

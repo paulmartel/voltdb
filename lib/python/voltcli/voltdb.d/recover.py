@@ -33,7 +33,11 @@
                                 default_host=True,
                                 safemode_available=True,
                                 supports_daemon=True,
-                                supports_multiple_daemons=True),
+                                supports_multiple_daemons=True,
+                                check_environment_config=True),
+    options = (
+        VOLT.BooleanOption('-r', '--replica', 'replica', 'recover replica cluster', default = False),
+    ),
     description = 'Start the database and recover the previous state.'
 )
 def recover(runner):

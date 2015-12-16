@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-
 import os, sys, commands, string
 from buildtools import *
 
@@ -26,12 +25,13 @@ from buildtools import *
 #  - Parse Target and Level from Command Line
 ###############################################################################
 
-CTX = BuildContext(sys.argv)
-
+###############################################################################
 # CTX is an instance of BuildContext, which is declared in buildtools.py
 # BuildContext contains vars that determine how the makefile will be built
 #  and how the build will go down. It also checks the platform and parses
 #  command line args to determine target and build level.
+###############################################################################
+CTX = BuildContext(sys.argv)
 
 ###############################################################################
 # SET GLOBAL CONTEXT VARIABLES FOR BUILDING
@@ -49,22 +49,30 @@ CTX.CPPFLAGS += """-Wall -Wextra -Werror -Woverloaded-virtual
             -DBOOST_SP_DISABLE_THREADS -DBOOST_DISABLE_THREADS -DBOOST_ALL_NO_LIB"""
 
 # clang doesn't seem to want this
-if compiler_name == 'gcc':
+if CTX.compilerName() == 'gcc':
     CTX.CPPFLAGS += " -pthread"
     CTX.LDFLAGS += " -rdynamic"
+    if (CTX.compilerMajorVersion() >= 4):
+        CTX.CPPFLAGS += " -Wno-deprecated-declarations  -Wno-unknown-pragmas"
+	if (CTX.compilerMinorVersion() == 6):
+	    CTX.CPPFLAGS += " -Wno-unused-but-set-variable"
+	if (CTX.compilerMinorVersion() == 9):
+            CTX.CPPFLAGS += " -Wno-float-conversion -Wno-unused-but-set-variable -Wno-unused-local-typedefs"
+        elif (CTX.compilerMinorVersion() == 8):
+	    CTX.CPPFLAGS += " -Wno-conversion -Wno-unused-but-set-variable -Wno-unused-local-typedefs"
 
-if (compiler_name == 'clang') and (compiler_major == 3 and compiler_minor >= 4):
+if (CTX.compilerName() == 'clang') and (CTX.compilerMajorVersion() == 3 and CTX.compilerMinorVersion() >= 4):
     CTX.CPPFLAGS += " -Wno-varargs"
 
-if (compiler_name != 'gcc') or (compiler_major == 4 and compiler_minor >= 3):
+if (CTX.compilerName() == 'clang') and (CTX.compilerMajorVersion() == 7):
+    CTX.CPPFLAGS += " -Wno-unused-local-typedefs -Wno-absolute-value"
+
+if (CTX.compilerName() != 'gcc') or (CTX.compilerMajorVersion() == 4 and CTX.compilerMinorVersion() >= 3) or (CTX.compilerMajorVersion() == 5):
     CTX.CPPFLAGS += " -Wno-ignored-qualifiers -fno-strict-aliasing"
+
 
 if CTX.PROFILE:
     CTX.CPPFLAGS += " -fvisibility=default -DPROFILE_ENABLED"
-
-# linker flags
-CTX.LDFLAGS += """ -g3"""
-CTX.LASTLDFLAGS = """ -ldl"""
 
 if CTX.COVERAGE:
     CTX.LDFLAGS += " -ftest-coverage -fprofile-arcs"
@@ -78,7 +86,7 @@ if CTX.PROFILE:
 
 # this is where the build will look for header files
 # - the test source will also automatically look in the test root dir
-CTX.INCLUDE_DIRS = ['src/ee']
+CTX.SRC_INCLUDE_DIRS += ['src/ee' ]
 CTX.SYSTEM_DIRS = ['third_party/cpp']
 
 # don't worry about checking for changes in header files in the following
@@ -89,25 +97,34 @@ CTX.IGNORE_SYS_PREFIXES = ['/usr/include', '/usr/lib', 'third_party']
 CTX.INPUT_PREFIX = "src/ee/"
 
 # where to find the source
-CTX.THIRD_PARTY_INPUT_PREFIX = "third_party/cpp/"
+CTX.THIRD_PARTY_INPUT_PREFIX = "third_party/cpp"
 
 # where to find the tests
 CTX.TEST_PREFIX = "tests/ee/"
 
+# linker flags
+CTX.LDFLAGS += """ -g3"""
+CTX.LASTLDFLAGS += """ -lpcre2-8 """
+CTX.LASTIPCLDFLAGS = """ -ldl """
+
 ###############################################################################
 # SET RELEASE LEVEL CONTEXT
 ###############################################################################
+if "VOLT_LOG_LEVEL" in os.environ:
+    LOG_LEVEL = os.environ["VOLT_LOG_LEVEL"]
+else:
+    LOG_LEVEL = "500"
 
 if CTX.LEVEL == "MEMCHECK":
-    CTX.CPPFLAGS += " -g3 -DDEBUG -DMEMCHECK -DVOLT_LOG_LEVEL=500"
+    CTX.CPPFLAGS += " -g3 -DDEBUG -DMEMCHECK -DVOLT_LOG_LEVEL=%s" % LOG_LEVEL
     CTX.OUTPUT_PREFIX = "obj/memcheck"
 
 if CTX.LEVEL == "DEBUG":
-    CTX.CPPFLAGS += " -g3 -DDEBUG -DVOLT_LOG_LEVEL=500"
+    CTX.CPPFLAGS += " -g3 -DDEBUG -DVOLT_LOG_LEVEL=%s" % LOG_LEVEL
     CTX.OUTPUT_PREFIX = "obj/debug"
 
 if CTX.LEVEL == "RELEASE":
-    CTX.CPPFLAGS += " -g3 -O3 -mmmx -msse -msse2 -msse3 -DNDEBUG -DVOLT_LOG_LEVEL=500"
+    CTX.CPPFLAGS += " -g3 -O3 -mmmx -msse -msse2 -msse3 -DNDEBUG -DVOLT_LOG_LEVEL=%s" % LOG_LEVEL
     CTX.OUTPUT_PREFIX = "obj/release"
 
 # build in parallel directory instead of subdir so that relative paths work
@@ -170,6 +187,7 @@ CTX.INPUT['catalog'] = """
  constraintref.cpp
  database.cpp
  index.cpp
+ indexref.cpp
  materializedviewinfo.cpp
  planfragment.cpp
  statement.cpp
@@ -177,13 +195,10 @@ CTX.INPUT['catalog'] = """
 """
 
 CTX.INPUT['structures'] = """
- CompactingPool.cpp
  ContiguousAllocator.cpp
 """
 
 CTX.INPUT['common'] = """
- CompactingStringPool.cpp
- CompactingStringStorage.cpp
  FatalException.cpp
  ThreadLocalPool.cpp
  SegvException.cpp
@@ -199,6 +214,7 @@ CTX.INPUT['common'] = """
  RecoveryProtoMessage.cpp
  RecoveryProtoMessageBuilder.cpp
  DefaultTupleSerializer.cpp
+ FullTupleSerializer.cpp
  executorcontext.cpp
  serializeio.cpp
  StreamPredicateList.cpp
@@ -206,26 +222,29 @@ CTX.INPUT['common'] = """
  TupleOutputStream.cpp
  TupleOutputStreamProcessor.cpp
  MiscUtil.cpp
+ debuglog.cpp
 """
 
 CTX.INPUT['execution'] = """
  FragmentManager.cpp
  JNITopend.cpp
  VoltDBEngine.cpp
+ ExecutorVector.cpp
 """
 
 CTX.INPUT['executors'] = """
+ OptimizedProjector.cpp
  abstractexecutor.cpp
  aggregateexecutor.cpp
  deleteexecutor.cpp
  executorutil.cpp
- indexscanexecutor.cpp
  indexcountexecutor.cpp
- tablecountexecutor.cpp
+ indexscanexecutor.cpp
  insertexecutor.cpp
  limitexecutor.cpp
- materializeexecutor.cpp
  materializedscanexecutor.cpp
+ materializeexecutor.cpp
+ mergereceiveexecutor.cpp
  nestloopexecutor.cpp
  nestloopindexexecutor.cpp
  orderbyexecutor.cpp
@@ -233,6 +252,8 @@ CTX.INPUT['executors'] = """
  receiveexecutor.cpp
  sendexecutor.cpp
  seqscanexecutor.cpp
+ tablecountexecutor.cpp
+ tuplescanexecutor.cpp
  unionexecutor.cpp
  updateexecutor.cpp
 """
@@ -243,13 +264,17 @@ CTX.INPUT['expressions'] = """
  vectorexpression.cpp
  functionexpression.cpp
  tupleaddressexpression.cpp
+ operatorexpression.cpp
  parametervalueexpression.cpp
+ subqueryexpression.cpp
+ scalarvalueexpression.cpp
 """
 
 CTX.INPUT['plannodes'] = """
  abstractjoinnode.cpp
  abstractoperationnode.cpp
  abstractplannode.cpp
+ abstractreceivenode.cpp
  abstractscannode.cpp
  aggregatenode.cpp
  deletenode.cpp
@@ -260,6 +285,7 @@ CTX.INPUT['plannodes'] = """
  limitnode.cpp
  materializenode.cpp
  materializedscanplannode.cpp
+ mergereceivenode.cpp
  nestloopindexnode.cpp
  nestloopnode.cpp
  orderbynode.cpp
@@ -270,6 +296,7 @@ CTX.INPUT['plannodes'] = """
  SchemaColumn.cpp
  sendnode.cpp
  seqscannode.cpp
+ tuplescannode.cpp
  unionnode.cpp
  updatenode.cpp
 """
@@ -368,13 +395,14 @@ if whichtests in ("${eetestsuite}", "logging"):
 if whichtests in ("${eetestsuite}", "common"):
     CTX.TESTS['common'] = """
      debuglog_test
-     serializeio_test
-     undolog_test
-     valuearray_test
+     elastic_hashinator_test
      nvalue_test
      pool_test
+     serializeio_test
      tabletuple_test
-     elastic_hashinator_test
+     tupleschema_test
+     undolog_test
+     valuearray_test
     """
 
 if whichtests in ("${eetestsuite}", "execution"):
@@ -383,10 +411,17 @@ if whichtests in ("${eetestsuite}", "execution"):
      engine_test
      FragmentManagerTest
     """
+if whichtests in ("${eetestsuite}", "executors"):
+    CTX.TESTS['executors'] = """
+    OptimizedProjectorTest
+    MergeReceiveExecutorTest
+    """
+
 
 if whichtests in ("${eetestsuite}", "expressions"):
     CTX.TESTS['expressions'] = """
      expression_test
+     function_test
     """
 
 if whichtests in ("${eetestsuite}", "indexes"):
@@ -401,19 +436,21 @@ if whichtests in ("${eetestsuite}", "indexes"):
 if whichtests in ("${eetestsuite}", "storage"):
     CTX.TESTS['storage'] = """
      CompactionTest
-     constraint_test
      CopyOnWriteTest
+     DRBinaryLog_test
+     DRTupleStream_test
+     ExportTupleStream_test
+     PersistentTableMemStatsTest
+     StreamedTable_test
+     TempTableLimitsTest
+     constraint_test
      filter_test
      persistent_table_log_test
-     PersistentTableMemStatsTest
+     persistenttable_test
      serialize_test
-     StreamedTable_test
      table_and_indexes_test
      table_test
      tabletuple_export_test
-     TempTableLimitsTest
-     ExportTupleStream_test
-     DRTupleStream_test
     """
 
 if whichtests in ("${eetestsuite}", "structures"):
@@ -422,12 +459,20 @@ if whichtests in ("${eetestsuite}", "structures"):
      CompactingMapIndexCountTest
      CompactingHashTest
      CompactingPoolTest
+     CompactingMapBenchmark
     """
 
 if whichtests in ("${eetestsuite}", "plannodes"):
     CTX.TESTS['plannodes'] = """
      PlanNodeFragmentTest
     """
+
+###############################################################################
+#
+# Print some configuration information.  This is useful for debugging.
+#
+###############################################################################
+print("Compiler: %s %d.%d.%d" % (CTX.compilerName(), CTX.compilerMajorVersion(), CTX.compilerMinorVersion(), CTX.compilerPatchLevel()))
 
 ###############################################################################
 # BUILD THE MAKEFILE

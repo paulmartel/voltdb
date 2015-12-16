@@ -1,7 +1,7 @@
 -- partitioned table
 CREATE TABLE partitioned
 (
-  txnid      bigint             NOT NULL ASSUMEUNIQUE
+  txnid      bigint             NOT NULL
 , prevtxnid  bigint             NOT NULL
 , ts         bigint             NOT NULL
 , cid        tinyint            NOT NULL
@@ -48,7 +48,7 @@ CREATE TABLE replicated
 , value      varbinary(1048576) NOT NULL
 , CONSTRAINT PK_id_r PRIMARY KEY
   (
-    txnid
+    cid, txnid
   )
 , UNIQUE ( cid, rid )
 );
@@ -143,6 +143,7 @@ CREATE TABLE loadp
   cid    BIGINT NOT NULL
 , txnid  BIGINT NOT NULL
 , rowid  BIGINT NOT NULL
+, CONSTRAINT pkey_id_forLoadPartitionSP PRIMARY KEY (cid, txnid)
 );
 PARTITION TABLE loadp ON COLUMN cid;
 CREATE TABLE cploadp
@@ -160,6 +161,7 @@ CREATE TABLE loadmp
   cid    BIGINT NOT NULL
 , txnid  BIGINT NOT NULL
 , rowid  BIGINT NOT NULL
+, CONSTRAINT pkey_id_forLoadPartitionMP PRIMARY KEY (cid, txnid)
 );
 CREATE TABLE cploadmp
 (
@@ -185,6 +187,28 @@ CREATE TABLE trup
 );
 PARTITION TABLE trup ON COLUMN p;
 
+CREATE TABLE capr
+(
+  p          bigint             NOT NULL
+, id         bigint             NOT NULL
+, tmstmp	 timestamp			NOT NULL
+, value      varbinary(1048576) NOT NULL
+, CONSTRAINT PK_id_cr PRIMARY KEY (p,id)
+, LIMIT PARTITION ROWS 10 EXECUTE (
+	DELETE FROM CAPR WHERE tmstmp < NOW
+) );
+
+CREATE TABLE capp
+(
+  p          bigint             NOT NULL
+, id         bigint             NOT NULL
+, tmstmp 	 timestamp			NOT NULL
+, value      varbinary(1048576) NOT NULL
+, CONSTRAINT PK_id_cp PRIMARY KEY (p,id)
+, LIMIT PARTITION ROWS 10 EXECUTE (
+	DELETE FROM CAPP WHERE tmstmp < NOW
+) );
+PARTITION TABLE capp ON COLUMN p;
 
 -- base procedures you shouldn't call
 CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.UpdateBaseProc;
@@ -208,6 +232,7 @@ CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.ReadSPInProcAdHoc;
 PARTITION PROCEDURE ReadSPInProcAdHoc ON TABLE partitioned COLUMN cid;
 CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.ReadMPInProcAdHoc;
 CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.Summarize;
+CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.Summarize_Replica;
 CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.BIGPTableInsert;
 PARTITION PROCEDURE BIGPTableInsert ON TABLE bigp COLUMN p;
 CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.BIGRTableInsert;
@@ -235,3 +260,8 @@ CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.TRUPScanAggTableSP;
 PARTITION PROCEDURE TRUPScanAggTableSP ON TABLE trup COLUMN p;
 CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.TRUPScanAggTableMP;
 CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.TRURScanAggTable;
+CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.CAPPTableInsert;
+PARTITION PROCEDURE CAPPTableInsert ON TABLE capp COLUMN p;
+CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.CAPRTableInsert;
+CREATE PROCEDURE FROM CLASS txnIdSelfCheck.procedures.CAPPCountPartitionRows;
+PARTITION PROCEDURE CAPPCountPartitionRows ON TABLE capp COLUMN p;

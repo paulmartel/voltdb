@@ -26,12 +26,13 @@ package org.voltdb.planner;
 import java.net.URL;
 import java.util.List;
 
-import junit.framework.TestCase;
-
 import org.apache.commons.lang3.StringUtils;
 import org.voltdb.catalog.Database;
 import org.voltdb.compiler.DeterminismMode;
 import org.voltdb.plannodes.AbstractPlanNode;
+import org.voltdb.types.PlanNodeType;
+
+import junit.framework.TestCase;
 
 public class PlannerTestCase extends TestCase {
 
@@ -39,11 +40,14 @@ public class PlannerTestCase extends TestCase {
     private boolean m_byDefaultInferPartitioning = true;
     private boolean m_byDefaultPlanForSinglePartition;
 
-    protected void failToCompile(String sql, String... patterns)
-    {
+    /**
+     * @param sql
+     * @return
+     */
+    private int countQuestionMarks(String sql) {
         int paramCount = 0;
         int skip = 0;
-        while(true) {
+        while (true) {
             // Yes, we ARE assuming that test queries don't contain quoted question marks.
             skip = sql.indexOf('?', skip);
             if (skip == -1) {
@@ -52,16 +56,23 @@ public class PlannerTestCase extends TestCase {
             skip++;
             paramCount++;
         }
+        return paramCount;
+    }
+
+    protected void failToCompile(String sql, String... patterns)
+    {
+        int paramCount = countQuestionMarks(sql);
         try {
-            m_aide.compile(sql, paramCount, m_byDefaultInferPartitioning, m_byDefaultPlanForSinglePartition, null);
-            fail();
+            List<AbstractPlanNode> unexpected = m_aide.compile(sql, paramCount,
+                    m_byDefaultInferPartitioning, m_byDefaultPlanForSinglePartition, null);
+            printExplainPlan(unexpected);
+            fail("Expected planner failure, but found success.");
         }
-        catch (PlanningErrorException ex) {
+        catch (Exception ex) {
             String result = ex.toString();
             for (String pattern : patterns) {
                 if ( ! result.contains(pattern)) {
-                    System.err.println("Did not find pattern '" + pattern + "' in error string '" + result + "'");
-                    fail();
+                    fail("Did not find pattern '" + pattern + "' in error string '" + result + "'");
                 }
             }
         }
@@ -190,10 +201,25 @@ public class PlannerTestCase extends TestCase {
         }
         catch (Exception ex) {
             ex.printStackTrace();
-            fail();
+            fail(ex.getMessage());
         }
         assertTrue(pns.get(0) != null);
         return pns.get(0);
+    }
+
+    /**
+     *  Find all the aggregate nodes in a fragment, whether they are hash, serial or partial.
+     * @param fragment     Fragment to search for aggregate plan nodes
+     * @return a list of all the nodes we found
+     */
+    protected static List<AbstractPlanNode> findAllAggPlanNodes(AbstractPlanNode fragment) {
+        List<AbstractPlanNode> aggNodes = fragment.findAllNodesOfType(PlanNodeType.AGGREGATE);
+        List<AbstractPlanNode> hashAggNodes = fragment.findAllNodesOfType(PlanNodeType.HASHAGGREGATE);
+        List<AbstractPlanNode> partialAggNodes = fragment.findAllNodesOfType(PlanNodeType.PARTIALAGGREGATE);
+
+        aggNodes.addAll(hashAggNodes);
+        aggNodes.addAll(partialAggNodes);
+        return aggNodes;
     }
 
 

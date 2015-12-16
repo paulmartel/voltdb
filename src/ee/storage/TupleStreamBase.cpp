@@ -38,15 +38,21 @@ using namespace voltdb;
 
 const int MAX_BUFFER_AGE = 4000;
 
-TupleStreamBase::TupleStreamBase()
-    : m_lastFlush(0), m_defaultCapacity(EL_BUFFER_SIZE),
+TupleStreamBase::TupleStreamBase(size_t extraHeaderSpace /*= 0*/)
+    : m_flushInterval(MAX_BUFFER_AGE),
+      m_lastFlush(0), m_defaultCapacity(EL_BUFFER_SIZE),
       m_uso(0), m_currBlock(NULL),
       // snapshot restores will call load table which in turn
       // calls appendTupple with LONG_MIN transaction ids
       // this allows initial ticks to succeed after rejoins
       m_openSpHandle(0),
+      m_openSequenceNumber(-1),
+      m_openUniqueId(0),
       m_openTransactionUso(0),
-      m_committedSpHandle(0), m_committedUso(0)
+      m_committedSpHandle(0), m_committedUso(0),
+      m_committedSequenceNumber(-1),
+      m_committedUniqueId(0),
+      m_headerSpace(MAGIC_HEADER_SPACE_FOR_JAVA + extraHeaderSpace)
 {
     extendBufferChain(m_defaultCapacity);
 }
@@ -91,7 +97,7 @@ void TupleStreamBase::cleanupManagedBuffers()
  * This is the only function that should modify m_openSpHandle,
  * m_openTransactionUso.
  */
-void TupleStreamBase::commit(int64_t lastCommittedSpHandle, int64_t currentSpHandle, int64_t txnId, bool sync, bool flush)
+void TupleStreamBase::commit(int64_t lastCommittedSpHandle, int64_t currentSpHandle, int64_t txnId, int64_t uniqueId, bool sync, bool flush)
 {
     if (currentSpHandle < m_openSpHandle)
     {
@@ -99,6 +105,10 @@ void TupleStreamBase::commit(int64_t lastCommittedSpHandle, int64_t currentSpHan
                 "Active transactions moving backwards: openSpHandle is %jd, while the current spHandle is %jd",
                 (intmax_t)m_openSpHandle, (intmax_t)currentSpHandle
                 );
+    } else if (currentSpHandle == m_openSpHandle && uniqueId >= 0 && uniqueId != m_openUniqueId) {
+        throwFatalException(
+                "Received a new transaction, but with the same spHandle (%jd): old uniqueId is %jd, new uniqueId is %jd",
+                (intmax_t)m_openSpHandle, (intmax_t)m_openUniqueId, (intmax_t)uniqueId);
     }
 
     // more data for an ongoing transaction with no new committed data
@@ -130,21 +140,25 @@ void TupleStreamBase::commit(int64_t lastCommittedSpHandle, int64_t currentSpHan
     // by ending the current open transaction and not starting a new one
     if (m_openSpHandle < currentSpHandle && currentSpHandle != lastCommittedSpHandle)
     {
-        if (m_openSpHandle > 0 && m_openSpHandle > m_committedSpHandle) {
-            endTransaction(m_openSpHandle);
+        if (uniqueId < 0) {
+            throwFatalException(
+                    "Received invalid uniqueId (%jd) with open spHandle %jd, currentSpHandle %jd, lastCommittedSpHandle %jd.",
+                    (intmax_t)uniqueId, (intmax_t)m_openSpHandle, (intmax_t)currentSpHandle, (intmax_t)lastCommittedSpHandle);
         }
         //std::cout << "m_openSpHandle(" << m_openSpHandle << ") < currentSpHandle("
-        //<< currentSpHandle << ")" << std::endl;T
+        //<< currentSpHandle << ")" << std::endl;
         m_committedUso = m_uso;
+        m_committedSequenceNumber = m_openSequenceNumber;
+        m_committedUniqueId = m_openUniqueId;
         // Advance the tip to the new transaction.
         m_committedSpHandle = m_openSpHandle;
         m_openSpHandle = currentSpHandle;
+        m_openSequenceNumber++;
+        m_openUniqueId = uniqueId;
 
         if (flush) {
             extendBufferChain(0);
         }
-
-        beginTransaction(txnId, currentSpHandle);
     }
 
     // now check to see if the lastCommittedSpHandle tells us that our open
@@ -154,11 +168,10 @@ void TupleStreamBase::commit(int64_t lastCommittedSpHandle, int64_t currentSpHan
     {
         //std::cout << "m_openSpHandle(" << m_openSpHandle << ") <= lastCommittedSpHandle(" <<
         //lastCommittedSpHandle << ")" << std::endl;
-        if (m_openSpHandle > 0 && m_openSpHandle > m_committedSpHandle) {
-            endTransaction(m_openSpHandle);
-        }
+        m_committedSequenceNumber = m_openSequenceNumber;
         m_committedUso = m_uso;
         m_committedSpHandle = m_openSpHandle;
+        m_committedUniqueId = m_openUniqueId;
 
         if (flush) {
             extendBufferChain(0);
@@ -204,10 +217,14 @@ void TupleStreamBase::pushPendingBlocks() {
 /*
  * Discard all data with a uso gte mark
  */
-void TupleStreamBase::rollbackTo(size_t mark)
+void TupleStreamBase::rollbackTo(size_t mark, size_t)
 {
     if (mark > m_uso) {
-        throwFatalException("Truncating the future.");
+        throwFatalException("Truncating the future: mark %jd, current USO %jd.",
+                            (intmax_t)mark, (intmax_t)m_uso);
+    } else if (mark < m_committedUso) {
+        throwFatalException("Truncating committed tuple data: mark %jd, committed USO %jd, current USO %jd, open spHandle %jd, committed spHandle %jd.",
+                            (intmax_t)mark, (intmax_t)m_committedUso, (intmax_t)m_uso, (intmax_t)m_openSpHandle, (intmax_t)m_committedSpHandle);
     }
 
     // back up the universal stream counter
@@ -239,6 +256,11 @@ void TupleStreamBase::rollbackTo(size_t mark)
             extendBufferChain(m_defaultCapacity);
         }
     }
+    if (m_uso == m_committedUso) {
+        m_openSequenceNumber = m_committedSequenceNumber;
+        m_openSpHandle = m_committedSpHandle;
+        m_openUniqueId = m_committedUniqueId;
+    }
 }
 
 /*
@@ -260,10 +282,13 @@ void TupleStreamBase::extendBufferChain(size_t minLength)
         // exportxxx: rollback instead?
         throwFatalException("Default capacity is less than required buffer size.");
     }
+    StreamBlock *oldBlock = NULL;
+    size_t uso = m_uso;
 
     if (m_currBlock) {
         if (m_currBlock->offset() > 0) {
             m_pendingBlocks.push_back(m_currBlock);
+            oldBlock = m_currBlock;
             m_currBlock = NULL;
         }
         // fully discard empty blocks. makes valgrind/testcase
@@ -273,13 +298,39 @@ void TupleStreamBase::extendBufferChain(size_t minLength)
             m_currBlock = NULL;
         }
     }
+    size_t blockSize = m_defaultCapacity;
+    bool openTransaction = checkOpenTransaction(oldBlock, minLength, blockSize, uso);
 
-    char *buffer = new char[m_defaultCapacity];
+    char *buffer = new char[blockSize];
     if (!buffer) {
         throwFatalException("Failed to claim managed buffer for Export.");
     }
+    m_currBlock = new StreamBlock(buffer, m_headerSpace, blockSize, uso);
+    if (blockSize > m_defaultCapacity) {
+        m_currBlock->setType(LARGE_STREAM_BLOCK);
+    }
 
-    m_currBlock = new StreamBlock(buffer, m_defaultCapacity, m_uso);
+    if (blockSize == 0) {
+        rollbackTo(uso, SIZE_MAX);
+        throw SQLException(SQLException::volt_output_buffer_overflow, "Transaction is bigger than DR Buffer size");
+    }
+
+    if (openTransaction) {
+        size_t partialTxnLength = oldBlock->offset() - oldBlock->lastDRBeginTxnOffset();
+        ::memcpy(m_currBlock->mutableDataPtr(), oldBlock->mutableLastBeginTxnDataPtr(), partialTxnLength);
+        m_currBlock->startDRSequenceNumber(m_openSequenceNumber);
+        m_currBlock->recordLastBeginTxnOffset();
+        m_currBlock->consumed(partialTxnLength);
+        ::memset(oldBlock->mutableLastBeginTxnDataPtr(), 0, partialTxnLength);
+        oldBlock->truncateTo(uso);
+        oldBlock->clearLastBeginTxnOffset();
+        // If the whole previous block has been moved to new block, discards the empty one.
+        if (oldBlock->offset() == 0) {
+            m_pendingBlocks.pop_back();
+            discardBlock(oldBlock);
+        }
+    }
+
 
     pushPendingBlocks();
 }
@@ -294,7 +345,7 @@ TupleStreamBase::periodicFlush(int64_t timeInMillis,
                                   int64_t lastCommittedSpHandle)
 {
     // negative timeInMillis instructs a mandatory flush
-    if (timeInMillis < 0 || (timeInMillis - m_lastFlush > MAX_BUFFER_AGE)) {
+    if (timeInMillis < 0 || (m_flushInterval > 0 && timeInMillis - m_lastFlush > m_flushInterval)) {
         int64_t maxSpHandle = std::max(m_openSpHandle, lastCommittedSpHandle);
         if (timeInMillis > 0) {
             m_lastFlush = timeInMillis;
@@ -307,6 +358,6 @@ TupleStreamBase::periodicFlush(int64_t timeInMillis,
          * in calls to this procedure may be called right after
          * these.
          */
-        commit(lastCommittedSpHandle, maxSpHandle, maxSpHandle, timeInMillis < 0 ? true : false, true);
+        commit(lastCommittedSpHandle, maxSpHandle, maxSpHandle, std::numeric_limits<int64_t>::min(), timeInMillis < 0 ? true : false, true);
     }
 }

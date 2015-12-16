@@ -34,6 +34,7 @@ import org.json_voltpatches.JSONObject;
 import org.voltcore.messaging.Mailbox;
 import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.Pair;
+import org.voltdb.DRLogSegmentId;
 import org.voltdb.PostSnapshotTask;
 import org.voltdb.PrivateVoltTableFactory;
 import org.voltdb.SnapshotDataFilter;
@@ -69,9 +70,11 @@ public class StreamSnapshotWritePlan extends SnapshotWritePlan
     public Callable<Boolean> createSetup(
             String file_path, String file_nonce,
             long txnId, Map<Integer, Long> partitionTransactionIds,
+            Map<Integer, Map<Integer, DRLogSegmentId>> remoteDCLastIds,
             JSONObject jsData, SystemProcedureExecutionContext context,
             final VoltTable result,
             Map<String, Map<Integer, Pair<Long, Long>>> exportSequenceNumbers,
+            Map<Integer, DRLogSegmentId> drTupleStreamInfo,
             SiteTracker tracker,
             HashinatorSnapshotData hashinatorData,
             long timestamp)
@@ -106,8 +109,10 @@ public class StreamSnapshotWritePlan extends SnapshotWritePlan
         // Coalesce a truncation snapshot if shouldTruncate is true
         if (config.shouldTruncate) {
             deferredSetup = coalesceTruncationSnapshotPlan(file_path, file_nonce, txnId, partitionTransactionIds,
-                                           jsData, context, result,
-                                           exportSequenceNumbers, tracker,
+                                           remoteDCLastIds,
+                                           context, result,
+                                           exportSequenceNumbers,
+                                           drTupleStreamInfo,tracker,
                                            hashinatorData,
                                            timestamp,
                                            newPartitionCount);
@@ -133,7 +138,14 @@ public class StreamSnapshotWritePlan extends SnapshotWritePlan
         // table schemas for all the tables we'll snapshot on this partition
         Map<Integer, byte[]> schemas = new HashMap<Integer, byte[]>();
         for (final Table table : config.tables) {
-            VoltTable schemaTable = CatalogUtil.getVoltTable(table);
+            VoltTable schemaTable;
+            if (context.getDatabase().getIsactiveactivedred() && table.getIsdred()) {
+                schemaTable = CatalogUtil.getVoltTable(table, CatalogUtil.DR_HIDDEN_COLUMN_INFO);
+            }
+            else {
+                schemaTable = CatalogUtil.getVoltTable(table);
+            }
+
             schemas.put(table.getRelativeIndex(), PrivateVoltTableFactory.getSchemaBytes(schemaTable));
         }
 
@@ -223,12 +235,16 @@ public class StreamSnapshotWritePlan extends SnapshotWritePlan
         };
     }
 
+    // The truncation snapshot will always have all the tables regardless of what tables are requested
+    // in the stream snapshot. Passing null to the JSON config below will cause the
+    // NativeSnapshotWritePlan to include all tables.
     private Callable<Boolean> coalesceTruncationSnapshotPlan(String file_path, String file_nonce, long txnId,
                                                              Map<Integer, Long> partitionTransactionIds,
-                                                             JSONObject jsData,
+                                                             Map<Integer, Map<Integer, DRLogSegmentId>> remoteDCLastIds,
                                                              SystemProcedureExecutionContext context,
                                                              VoltTable result,
                                                              Map<String, Map<Integer, Pair<Long, Long>>> exportSequenceNumbers,
+                                                             Map<Integer, DRLogSegmentId> drTupleStreamInfo,
                                                              SiteTracker tracker,
                                                              HashinatorSnapshotData hashinatorData,
                                                              long timestamp,
@@ -236,8 +252,8 @@ public class StreamSnapshotWritePlan extends SnapshotWritePlan
     {
         final NativeSnapshotWritePlan plan = new NativeSnapshotWritePlan();
         final Callable<Boolean> deferredTruncationSetup =
-                plan.createSetupInternal(file_path, file_nonce, txnId, partitionTransactionIds,
-                        jsData, context, result, exportSequenceNumbers,
+                plan.createSetupInternal(file_path, file_nonce, txnId, partitionTransactionIds, remoteDCLastIds,
+                        null, context, result, exportSequenceNumbers, drTupleStreamInfo,
                         tracker, hashinatorData, timestamp, newPartitionCount);
         m_taskListsForHSIds.putAll(plan.m_taskListsForHSIds);
 

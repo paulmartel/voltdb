@@ -108,6 +108,8 @@ bool InsertExecutor::p_init(AbstractPlanNode* abstractNode,
 
     m_multiPartition = m_node->isMultiPartition();
 
+    m_sourceIsPartitioned = m_node->sourceIsPartitioned();
+
     // allocate memory for template tuple, set defaults for all columns
     m_templateTuple.init(targetTable->schema());
 
@@ -126,14 +128,6 @@ bool InsertExecutor::p_init(AbstractPlanNode* abstractNode,
 }
 
 bool InsertExecutor::executePurgeFragmentIfNeeded(PersistentTable** ptrToTable) {
-    InsertPlanNode *insertPlanNode = static_cast<InsertPlanNode*>(getPlanNode());
-    if (insertPlanNode->isMultiRowInsert()) {
-        // Multi-row inserts triggering a purge is not supported yet.
-        // This should not be difficult to support, just need to
-        // remove this check and add testing.
-        return true;
-    }
-
     PersistentTable* table = *ptrToTable;
     int tupleLimit = table->tupleLimit();
     int numTuples = table->visibleTupleCount();
@@ -144,14 +138,7 @@ bool InsertExecutor::executePurgeFragmentIfNeeded(PersistentTable** ptrToTable) 
     if (numTuples >= tupleLimit) {
         // Next insert will fail: run the purge fragment
         // before trying to insert.
-        int rc = m_engine->executePurgeFragment(table);
-        if (rc != ENGINE_ERRORCODE_SUCCESS) {
-            VOLT_ERROR("Unexpected error while attempting to purge "
-                       "rows from table %s.  Row limit: %d",
-                       table->name().c_str(),
-                       tupleLimit);
-            return false;
-        }
+        m_engine->executePurgeFragment(table);
 
         // If the purge fragment did a truncate table, then the old
         // table is still around for undo purposes, but there is now a
@@ -197,6 +184,11 @@ bool InsertExecutor::p_execute(const NValueArray &params) {
     for (it = m_nowFields.begin(); it != m_nowFields.end(); ++it) {
         templateTuple.setNValue(*it, NValue::callConstant<FUNC_CURRENT_TIMESTAMP>());
     }
+
+    VOLT_DEBUG("This is a %s-row insert on partition with id %d",
+               m_node->getChildren()[0]->getPlanNodeType() == PLAN_NODE_TYPE_MATERIALIZE ?
+               "single" : "multi", m_engine->getPartitionId());
+    VOLT_DEBUG("Offset of partition column is %d", m_partitionColumn);
 
     //
     // An insert is quite simple really. We just loop through our m_inputTable
@@ -247,9 +239,12 @@ bool InsertExecutor::p_execute(const NValueArray &params) {
             }
         }
 
-        // for multi partition export tables,
-        //  only insert them into one place (the partition with hash(0))
-        if (m_isStreamed && m_multiPartition) {
+        // for multi partition export tables, only insert into one
+        // place (the partition with hash(0)), if the data is from a
+        // replicated source.  If the data is coming from a subquery
+        // with partitioned tables, we need to perform the insert on
+        // every partition.
+        if (m_isStreamed && m_multiPartition && !m_sourceIsPartitioned) {
             bool isLocal = m_engine->isLocalSite(ValueFactory::getBigIntValue(0));
             if (!isLocal) continue;
         }
@@ -278,7 +273,7 @@ bool InsertExecutor::p_execute(const NValueArray &params) {
         } else {
             // upsert execution logic
             assert(persistentTable->primaryKeyIndex() != NULL);
-            TableTuple existsTuple = persistentTable->lookupTuple(templateTuple);
+            TableTuple existsTuple = persistentTable->lookupTupleByValues(templateTuple);
 
             if (existsTuple.isNullTuple()) {
                 // try to put the tuple into the target table
@@ -326,6 +321,6 @@ bool InsertExecutor::p_execute(const NValueArray &params) {
 
     // add to the planfragments count of modified tuples
     m_engine->addToTuplesModified(modifiedTuples);
-    VOLT_DEBUG("Finished inserting tuple");
+    VOLT_DEBUG("Finished inserting %d tuples", modifiedTuples);
     return true;
 }

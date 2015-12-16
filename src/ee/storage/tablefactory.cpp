@@ -69,7 +69,8 @@ Table* TableFactory::getPersistentTable(
             bool exportOnly,
             int tableAllocationTargetSize,
             int tupleLimit,
-            int32_t compactionThreshold)
+            int32_t compactionThreshold,
+            bool drEnabled)
 {
     Table *table = NULL;
 
@@ -77,15 +78,47 @@ Table* TableFactory::getPersistentTable(
         table = new StreamedTable(exportEnabled);
     }
     else {
-        table = new PersistentTable(partitionColumn, signature, tableIsMaterialized, tableAllocationTargetSize, tupleLimit);
+        table = new PersistentTable(partitionColumn, signature, tableIsMaterialized, tableAllocationTargetSize, tupleLimit, drEnabled);
     }
 
-    initCommon(databaseId, table, name, schema, columnNames, true, compactionThreshold);
+    initCommon(databaseId,
+               table,
+               name,
+               schema,
+               columnNames,
+               true,  // table will take ownership of TupleSchema object
+               compactionThreshold);
 
     // initialize stats for the table
     configureStats(databaseId, name, table);
 
-    return dynamic_cast<Table*>(table);
+    return table;
+}
+
+// This is a convenient wrapper for test only.
+Table* TableFactory::getStreamedTableForTest(
+            voltdb::CatalogId databaseId,
+            const std::string &name,
+            TupleSchema* schema,
+            const std::vector<std::string> &columnNames,
+            ExportTupleStream* wrapper,
+            bool exportEnabled,
+            int32_t compactionThreshold)
+{
+    Table *table = new StreamedTable(exportEnabled, wrapper);
+
+    initCommon(databaseId,
+               table,
+               name,
+               schema,
+               columnNames,
+               true,  // table will take ownership of TupleSchema object
+               compactionThreshold);
+
+    // initialize stats for the table
+    configureStats(databaseId, name, table);
+
+    return table;
 }
 
 TempTable* TableFactory::getTempTable(

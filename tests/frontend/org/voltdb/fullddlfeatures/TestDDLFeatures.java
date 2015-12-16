@@ -69,10 +69,18 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
         teardownSystem();
     }
 
+    /**
+     * A (public) method used to start the client, without also starting the
+     * server; needed by FullDdlSqlTest.java, in the GEB/VMC tests.
+     */
+    public void startClient() throws Exception
+    {
+        startClient(null);
+    }
 
     @Test
     public void testCreateUniqueIndex() throws Exception {
-        assertTrue(findTableInSystemCatalogResults("T17"));
+        assertTrue(findTableInSystemCatalogResults("T1"));
         assertTrue(findIndexInSystemCatalogResults("area"));
         assertTrue(verifyIndexUniqueness("area", true));
         assertEquals(indexedColumnCount("T1"), 2);
@@ -230,7 +238,12 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
 
         threw = false;
         try {
-            m_client.callProcedure("T12.insert", 3, 2);
+            // Attempt to add an identical row: using the same partition key
+            // guarantees that this will go to the same partition as the earlier
+            // insert; using the the same constraint key (in the same partition)
+            // means that the ASSUMEUNIQUE constraint will be violoated, so an
+            // exception should be thrown
+            m_client.callProcedure("T12.insert", 1, 2);
         } catch (ProcCallException pce) {
             threw = true;
         }
@@ -265,6 +278,41 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
     }
 
     @Test
+    public void testCreateTableConstraintWithoutKeyword() throws Exception {
+        ClientResponse resp;
+        boolean threw;
+
+        // Test for T17
+        assertTrue(findTableInSystemCatalogResults("T17"));
+        resp = m_client.callProcedure("T17.insert", 1);
+        assertEquals(resp.getResults()[0].getRowCount(), 1);
+
+        // Test for T18
+        assertTrue(findTableInSystemCatalogResults("T18"));
+        resp = m_client.callProcedure("T18.insert", 1);
+        assertEquals(resp.getResults()[0].getRowCount(), 1);
+
+        // Test for T19
+        assertTrue(findTableInSystemCatalogResults("T19"));
+        resp = m_client.callProcedure("T19.insert", 1, 2);
+        assertEquals(resp.getResults()[0].getRowCount(), 1);
+
+        // Test for T20
+        assertTrue(findTableInSystemCatalogResults("T20"));
+        resp = m_client.callProcedure("T20.insert", 1);
+        assertEquals(resp.getResults()[0].getRowCount(), 1);
+
+        threw = false;
+        try {
+            m_client.callProcedure("T20.insert", 2);
+        } catch (ProcCallException pce) {
+            pce.printStackTrace();
+            threw = true;
+        }
+        assertTrue("Shouldn't violate LIMIT PARTITION ROW constraint", threw);
+    }
+
+    @Test
     public void testCreateView() throws Exception
     {
         assertTrue(findTableInSystemCatalogResults("T24"));
@@ -282,8 +330,13 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
     @Test
     public void testExportTable() throws Exception
     {
+        if (!MiscUtils.isPro()) { return; } // not supported in community
+
         assertTrue(findTableInSystemCatalogResults("T25"));
         assertEquals(getTableType("T25"), "EXPORT");
+        //Export table created with STREAM syntax
+        assertTrue(findTableInSystemCatalogResults("T25S"));
+        assertEquals(getTableType("T25S"), "EXPORT");
     }
 
 //    @Test
@@ -330,14 +383,14 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
 
         ClientResponse resp;
         VoltTable vt;
-        resp = m_client.callProcedure("p4", 18);
+        resp = m_client.callProcedure("p4", 1, 18);
         vt = resp.getResults()[0];
         vt.advanceToRow(0);
         assertEquals(vt.get(0, VoltType.BIGINT), 0l);
 
         m_client.callProcedure("T26.insert", 18, 1);
 
-        resp = m_client.callProcedure("p4", 18);
+        resp = m_client.callProcedure("p4", 1, 18);
         vt = resp.getResults()[0];
         vt.advanceToRow(0);
         assertEquals(vt.get(0, VoltType.BIGINT), 1l);
@@ -646,5 +699,43 @@ public class TestDDLFeatures extends AdhocDDLTestBase {
         assertTrue(verifyTableColumnType("T54", "C2", "VARCHAR"));
         assertFalse(isColumnNullable("T54", "C1"));
         assertTrue(isColumnNullable("T54", "C2"));
+    }
+
+
+    @Test
+    public void testTableDR() throws Exception
+    {
+        // Test for T56 (DR table exists)
+        assertTrue(findTableInSystemCatalogResults("T56"));
+        assertTrue(doesColumnExist("T56", "C1" ));
+        assertTrue(doesColumnExist("T56", "C2" ));
+        assertTrue(isColumnNullable("T56", "C2"));
+        assertTrue(isDRedTable("T56"));
+
+        // Test for T57 (DR partitioned table exists)
+        assertTrue(findTableInSystemCatalogResults("T57"));
+        assertTrue(doesColumnExist("T57", "C1" ));
+        assertTrue(doesColumnExist("T57", "C2" ));
+        assertTrue(isColumnPartitionColumn("T57", "C2"));
+        assertTrue(isDRedTable("T57"));
+
+        // Test that T58 and T59 have been dropped
+        assertFalse(findTableInSystemCatalogResults("T58"));
+        assertFalse(findTableInSystemCatalogResults("T59"));
+
+        // Test that the DR flag is false for T60 and T61 (after disable)
+        assertTrue(findTableInSystemCatalogResults("T60"));
+        assertTrue(doesColumnExist("T60", "C1" ));
+        assertTrue(doesColumnExist("T60", "C2" ));
+        assertTrue(doesColumnExist("T60", "C3" ));
+        assertTrue(verifyTableColumnType("T60", "C3", "INTEGER"));
+        assertFalse(isDRedTable("T60"));
+        assertTrue(findTableInSystemCatalogResults("T61"));
+        assertTrue(doesColumnExist("T61", "C1" ));
+        assertTrue(doesColumnExist("T61", "C2" ));
+        assertTrue(doesColumnExist("T61", "C3" ));
+        assertTrue(isColumnPartitionColumn("T61", "C3"));
+        assertTrue(verifyTableColumnType("T61", "C3", "INTEGER"));
+        assertFalse(isDRedTable("T61"));
     }
 }

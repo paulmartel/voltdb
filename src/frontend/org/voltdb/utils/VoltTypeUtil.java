@@ -24,7 +24,6 @@ import java.util.Date;
 import java.util.HashSet;
 import java.util.Random;
 import java.util.Set;
-import java.util.SortedMap;
 import java.util.logging.Logger;
 
 import org.voltdb.VoltType;
@@ -141,18 +140,20 @@ public abstract class VoltTypeUtil {
 
     private static final VoltType CAST_ORDER[] = {
         VoltType.STRING,
-        VoltType.DECIMAL,
         VoltType.FLOAT,
+        VoltType.DECIMAL,
         VoltType.TIMESTAMP,
         VoltType.BIGINT,
     };
+
+    public static final String VoltTypeCastErrorMessage = "ERROR: Unable to determine cast type for '%s' and '%s' types";
 
     public static VoltType determineImplicitCasting(VoltType left, VoltType right) {
         //
         // Make sure both are valid
         //
         if (left == VoltType.INVALID || right == VoltType.INVALID) {
-            throw new VoltTypeException("ERROR: Unable to determine cast type for '" + left + "' and '" + right + "' types");
+            throw new VoltTypeException(String.format(VoltTypeCastErrorMessage, left, right));
         }
         // Check for NULL first, if either type is NULL the output is always NULL
         // XXX do we need to actually check for all NULL_foo types here?
@@ -166,16 +167,13 @@ public abstract class VoltTypeUtil {
         else if ((left == VoltType.STRING && right != VoltType.STRING) ||
                 (left != VoltType.STRING && right == VoltType.STRING))
         {
-            throw new VoltTypeException("ERROR: Unable to determine cast type for '" +
-                                        left + "' and '" + right + "' types");
+            throw new VoltTypeException(String.format(VoltTypeCastErrorMessage, left, right));
         }
-
-        // Allow promoting INTEGER types to DECIMAL.
-        else if ((left == VoltType.DECIMAL || right == VoltType.DECIMAL) &&
-                !(left.isExactNumeric() && right.isExactNumeric()))
+        // No mixing of numbers and non-numbers
+        else if ((left.isNumber() && !right.isNumber()) ||
+                 (right.isNumber() && !left.isNumber()))
         {
-            throw new VoltTypeException("ERROR: Unable to determine cast type for '" +
-                                        left + "' and '" + right + "' types");
+            throw new VoltTypeException(String.format(VoltTypeCastErrorMessage, left, right));
         }
         //
         // The following list contains the rules that use for casting:
@@ -183,11 +181,11 @@ public abstract class VoltTypeUtil {
         //    (1) If both types are a STRING, the output is always a STRING
         //        Note that up above we made sure that they do not mix strings and numbers
         //            Example: STRING + STRING -> STRING
-        //    (2) If one type is a DECIMAL, the output is always a DECIMAL
-        //        Note that above we made sure that DECIMAL only mixes with
-        //        allowed types
-        //    (3) Floating-point types take precedence over integers
-        //            Example: FLOAT + INTEGER -> FLOAT
+        //    (2) Floating-point types take precedence over integers
+        //            Example: FLOAT + INTEGER/DECIMAL -> FLOAT
+        //    (3) If one type is a DECIMAL, the output is always a DECIMAL (FLOAT has been handled already)
+        //        Note that at this step we made sure that DECIMAL only mixes with EXACT number
+        //
         //    (4) Specific types for floating-point and integer types take precedence
         //        over the more general types
         //            Example: MONEY + FLOAT -> MONEY
@@ -287,21 +285,6 @@ public abstract class VoltTypeUtil {
         return (ret);
     }
 
-    /**
-     * Get a string signature for the table represented by the args
-     * @param name The name of the table
-     * @param schema A sorted map of the columns in the table, keyed by column index
-     * @return The table signature string.
-     */
-    public static String getSignatureForTable(String name, SortedMap<Integer, VoltType> schema) {
-        StringBuilder sb = new StringBuilder();
-        sb.append(name);
-        for (VoltType t : schema.values()) {
-            sb.append(t.getSignatureChar());
-        }
-        return sb.toString();
-    }
-
     public static long getHashableLongFromObject(Object obj) {
         if (obj == null || VoltType.isNullVoltType(obj)) {
             return 0;
@@ -323,13 +306,15 @@ public abstract class VoltTypeUtil {
 
         // The lower 6 digits of the microsecond timestamp (including the "double-counted" millisecond digits)
         // must be scaled up to get the 9-digit (rounded) nanosecond value.
-        if (timestamp >= 0) {
-            result = new java.sql.Timestamp(timestamp/1000);
-            result.setNanos(((int) (timestamp % 1000000))*1000);
-        } else {
-            result = new java.sql.Timestamp((timestamp/1000000 - 1) * 1000);
+        int remaining = (int) (timestamp % 1000000);
 
-            int remaining = (int) (timestamp % 1000000);
+        // timestamp after epoch or timestamp without fractional seconds
+        if (timestamp >= 0 || remaining == 0) {
+            result = new java.sql.Timestamp(timestamp/1000);
+            result.setNanos(remaining*1000);
+        } else {
+            // timestamp before epoch that has fractional seconds
+            result = new java.sql.Timestamp((timestamp/1000000 - 1) * 1000);
             result.setNanos((remaining+1000000) * 1000 );
         }
 
@@ -370,5 +355,23 @@ public abstract class VoltTypeUtil {
             }
             return value;
         }
+    }
+
+    /**
+     * If the type is NUMERIC from hsqldb, VoltDB has to decide its real type.
+     * It's either INTEGER or DECIMAL according to the SQL Standard.
+     * Thanks for Hsqldb 1.9, FLOAT literal values have been handled well with E sign.
+     * @param vt
+     * @param value
+     * @return
+     */
+    public static VoltType getNumericLiteralType(VoltType vt, String value) {
+        try {
+            Long.parseLong(value);
+        } catch (NumberFormatException e) {
+            // Our DECIMAL may not be bigger/smaller enough to store the constant value
+            return VoltType.DECIMAL;
+        }
+        return vt;
     }
 }

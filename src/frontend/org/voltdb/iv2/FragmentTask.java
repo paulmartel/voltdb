@@ -25,10 +25,12 @@ import org.voltcore.logging.Level;
 import org.voltcore.messaging.Mailbox;
 import org.voltcore.utils.CoreUtils;
 import org.voltdb.ParameterSet;
+import org.voltdb.ProcedureRunner;
 import org.voltdb.SiteProcedureConnection;
 import org.voltdb.VoltTable;
 import org.voltdb.VoltTable.ColumnInfo;
 import org.voltdb.VoltType;
+import org.voltdb.client.BatchTimeoutOverrideType;
 import org.voltdb.exceptions.EEException;
 import org.voltdb.exceptions.InterruptException;
 import org.voltdb.exceptions.SQLException;
@@ -94,10 +96,25 @@ public class FragmentTask extends TransactionTask
                 m_txnState.setBeginUndoToken(siteConnection.getLatestUndoToken());
             }
         }
-        final FragmentResponseMessage response = processFragmentTask(siteConnection);
-        // completion?
-        response.m_sourceHSId = m_initiator.getHSId();
-        m_initiator.deliver(response);
+
+        int originalTimeout = siteConnection.getBatchTimeout();
+        int individualTimeout = m_fragmentMsg.getBatchTimeout();
+        try {
+            if (BatchTimeoutOverrideType.isUserSetTimeout(individualTimeout)) {
+                siteConnection.setBatchTimeout(individualTimeout);
+            }
+
+            // execute the procedure
+            final FragmentResponseMessage response = processFragmentTask(siteConnection);
+            // completion?
+            response.m_sourceHSId = m_initiator.getHSId();
+            m_initiator.deliver(response);
+        } finally {
+            if (BatchTimeoutOverrideType.isUserSetTimeout(individualTimeout)) {
+                siteConnection.setBatchTimeout(originalTimeout);
+            }
+        }
+
         completeFragment();
 
         if (hostLog.isDebugEnabled()) {
@@ -155,6 +172,7 @@ public class FragmentTask extends TransactionTask
                 m_txnState.setBeginUndoToken(siteConnection.getLatestUndoToken());
             }
         }
+
         // ignore response.
         processFragmentTask(siteConnection);
         completeFragment();
@@ -175,6 +193,15 @@ public class FragmentTask extends TransactionTask
     // modifed to work in the new world
     public FragmentResponseMessage processFragmentTask(SiteProcedureConnection siteConnection)
     {
+        // Ensure default procs loaded here
+        // Also used for LoadMultipartitionTable
+        String procNameToLoad = m_fragmentMsg.getProcNameToLoad();
+        if (procNameToLoad != null) {
+            // this will ensure proc is loaded
+            ProcedureRunner runner = siteConnection.getProcedureRunner(procNameToLoad);
+            assert(runner != null);
+        }
+
         // IZZY: actually need the "executor" HSId these days?
         final FragmentResponseMessage currentFragResponse =
             new FragmentResponseMessage(m_fragmentMsg, m_initiator.getHSId());

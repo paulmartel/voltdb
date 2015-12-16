@@ -45,7 +45,11 @@ class StreamedTable : public Table {
 
   public:
     StreamedTable(bool exportEnabled);
+    StreamedTable(bool exportEnabled, ExportTupleStream* wrapper);
     static StreamedTable* createForTest(size_t, ExecutorContext*);
+
+    //This returns true if a stream was created thus caller can setSignatureAndGeneration to push.
+    bool enableStream();
 
     virtual ~StreamedTable();
 

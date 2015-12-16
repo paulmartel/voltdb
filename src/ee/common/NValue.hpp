@@ -34,12 +34,12 @@
 #include "boost/functional/hash.hpp"
 #include "ttmath/ttmathint.h"
 
+#include "catalog/catalog.h"
 #include "common/ExportSerializeIo.h"
 #include "common/FatalException.hpp"
 #include "common/Pool.hpp"
 #include "common/SQLException.h"
 #include "common/StringRef.h"
-#include "common/ThreadLocalPool.h"
 #include "common/debuglog.h"
 #include "common/serializeio.h"
 #include "common/types.h"
@@ -157,7 +157,7 @@ inline void throwDataExceptionIfInfiniteOrNaN(double value, const char* function
         return;
     }
     char msg[1024];
-    snprintf(msg, 1024, "Invalid result value (%f) from floating point %s", value, function);
+    snprintf(msg, sizeof(msg), "Invalid result value (%f) from floating point %s", value, function);
     throw SQLException(SQLException::data_exception_numeric_value_out_of_range, msg);
 }
 
@@ -564,13 +564,68 @@ class NValue {
 
     /* Return a string full of arcana and wonder. */
     std::string debug() const;
+    std::string toString() const {
+        if (isNull()) {
+            return "null";
+        }
+
+        std::stringstream value;
+        const ValueType type = getValueType();
+        switch (type) {
+        case VALUE_TYPE_TINYINT:
+            // This cast keeps the tiny int from being confused for a char.
+            value << static_cast<int>(getTinyInt()); break;
+        case VALUE_TYPE_SMALLINT:
+            value << getSmallInt(); break;
+        case VALUE_TYPE_INTEGER:
+            value << getInteger(); break;
+        case VALUE_TYPE_BIGINT:
+            value << getBigInt(); break;
+        case VALUE_TYPE_DOUBLE:
+            // Use the specific standard SQL formatting for float values,
+            // which the C/C++ format options don't quite support.
+            streamSQLFloatFormat(value, getDouble());
+            break;
+        case VALUE_TYPE_DECIMAL:
+            value << createStringFromDecimal(); break;
+        case VALUE_TYPE_VARCHAR:
+            return std::string(reinterpret_cast<char*>(getObjectValue_withoutNull()),
+                               getObjectLength_withoutNull());
+        case VALUE_TYPE_VARBINARY: {
+            size_t objLen = getObjectLength_withoutNull();
+            char *buf = new char[objLen * 2 + 1];
+            catalog::Catalog::hexEncodeString(reinterpret_cast<char*>(getObjectValue_withoutNull()), buf, objLen);
+            std::string retval(buf, objLen * 2);
+            delete [] buf;
+            return retval;
+        }
+        case VALUE_TYPE_TIMESTAMP: {
+            streamTimestamp(value);
+            break;
+        }
+        default:
+            throwCastSQLException(type, VALUE_TYPE_VARCHAR);
+        }
+        return value.str();
+    }
 
     // Constants for Decimal type
     // Precision and scale (inherent in the schema)
     static const uint16_t kMaxDecPrec = 38;
     static const uint16_t kMaxDecScale = 12;
-    static const int64_t kMaxScaleFactor = 1000000000000;
-
+    static const int64_t kMaxScaleFactor = 1000000000000;         // == 10**12
+  private:
+    // Our maximum scale is 12.  Our maximum precision is 38.  So,
+    // the maximum number of decimal digits is 38 - 12 = 26.  We can't
+    // represent 10**26 in a 64 bit integer, but we can represent 10**18.
+    // So, to test if a TTInt named m is too big we test if
+    // m/kMaxWholeDivisor < kMaxWholeFactor
+    static const uint64_t kMaxWholeDivisor = 100000000;             // == 10**8
+    static const uint64_t kMaxWholeFactor = 1000000000000000000;    // == 10**18
+    static bool inline oversizeWholeDecimal(TTInt ii) {
+        return (TTInt(kMaxWholeFactor) <= ii / kMaxWholeDivisor);
+    }
+  public:
     // setArrayElements is a const method since it doesn't actually mutate any NValue state, just
     // the state of the contained NValues which are referenced via the allocated object storage.
     // For example, it is not intended to ever "grow the array" which would require the NValue's
@@ -650,8 +705,30 @@ class NValue {
         return &valueChars[i];
     }
 
+    // Copy a value. If the value is inlined in a source tuple, then allocate
+    // memory from the temp string pool and copy data there
+    NValue copyNValue() const
+    {
+        NValue copy = *this;
+        if (m_sourceInlined) {
+            // The NValue storage is inlined (a pointer to the backing tuple storage) and needs
+            // to be copied to a local storage
+            copy.allocateObjectFromInlinedValue(getTempStringPool());
+        }
+        return copy;
+    }
 
-  private:
+    std::size_t getAllocationSizeForObject() const
+    {
+        if (isNull()) {
+            return 0;
+        }
+        assert( ! m_sourceInlined);
+        StringRef* sref = *reinterpret_cast<StringRef* const*>(m_data);
+        return sref->getAllocatedSize();
+    }
+
+private:
     /*
      * Private methods are private for a reason. Don't expose the raw
      * data so that it can be operated on directly.
@@ -924,9 +1001,6 @@ class NValue {
 
     bool isBooleanNULL() const ;
 
-    std::size_t getAllocationSizeForObject() const;
-    static std::size_t getAllocationSizeForObject(int32_t length);
-
     static void throwCastSQLException(const ValueType origType,
                                       const ValueType newType)
     {
@@ -956,6 +1030,10 @@ class NValue {
         return fractional.ToInt();
     }
 
+    /**
+     * Implicitly converting function to big integer type
+     * DOUBLE, DECIMAL should not be handled here
+     */
     int64_t castAsBigIntAndGetValue() const {
         assert(isNull() == false);
 
@@ -972,39 +1050,16 @@ class NValue {
             return getBigInt();
         case VALUE_TYPE_TIMESTAMP:
             return getTimestamp();
-        case VALUE_TYPE_DOUBLE:
-            if (getDouble() > (double)INT64_MAX || getDouble() < (double)VOLT_INT64_MIN) {
-                throwCastSQLValueOutOfRangeException<double>(getDouble(), VALUE_TYPE_DOUBLE, VALUE_TYPE_BIGINT);
-            }
-            return static_cast<int64_t>(getDouble());
-        case VALUE_TYPE_ADDRESS:
-            return getBigInt();
         default:
             throwCastSQLException(type, VALUE_TYPE_BIGINT);
             return 0; // NOT REACHED
         }
     }
 
-    int64_t castAsRawInt64AndGetValue() const {
-        const ValueType type = getValueType();
-
-        switch (type) {
-        case VALUE_TYPE_TINYINT:
-            return static_cast<int64_t>(getTinyInt());
-        case VALUE_TYPE_SMALLINT:
-            return static_cast<int64_t>(getSmallInt());
-        case VALUE_TYPE_INTEGER:
-            return static_cast<int64_t>(getInteger());
-        case VALUE_TYPE_BIGINT:
-            return getBigInt();
-        case VALUE_TYPE_TIMESTAMP:
-            return getTimestamp();
-        default:
-            throwCastSQLException(type, VALUE_TYPE_BIGINT);
-            return 0; // NOT REACHED
-        }
-    }
-
+    /**
+     * Implicitly converting function to integer type
+     * DOUBLE, DECIMAL should not be handled here
+     */
     int32_t castAsIntegerAndGetValue() const {
         assert(isNull() == false);
 
@@ -1023,14 +1078,6 @@ class NValue {
             const int64_t value = getBigInt();
             if (value > (int64_t)INT32_MAX || value < (int64_t)VOLT_INT32_MIN) {
                 throwCastSQLValueOutOfRangeException<int64_t>(value, VALUE_TYPE_BIGINT, VALUE_TYPE_INTEGER);
-            }
-            return static_cast<int32_t>(value);
-        }
-        case VALUE_TYPE_DOUBLE:
-        {
-            const double value = getDouble();
-            if (value > (double)INT32_MAX || value < (double)VOLT_INT32_MIN) {
-                throwCastSQLValueOutOfRangeException(value, VALUE_TYPE_DOUBLE, VALUE_TYPE_INTEGER);
             }
             return static_cast<int32_t>(value);
         }
@@ -1092,7 +1139,7 @@ class NValue {
           case VALUE_TYPE_INTEGER:
           case VALUE_TYPE_BIGINT:
           case VALUE_TYPE_TIMESTAMP: {
-            int64_t value = castAsRawInt64AndGetValue();
+            int64_t value = castAsBigIntAndGetValue();
             TTInt retval(value);
             retval *= kMaxScaleFactor;
             return retval;
@@ -1472,7 +1519,7 @@ class NValue {
         case VALUE_TYPE_INTEGER:
         case VALUE_TYPE_BIGINT:
         {
-            int64_t rhsint = castAsRawInt64AndGetValue();
+            int64_t rhsint = castAsBigIntAndGetValue();
             retval.createDecimalFromInt(rhsint);
             break;
         }
@@ -1520,6 +1567,10 @@ class NValue {
      */
     void inlineCopyObject(void *storage, int32_t maxLength, bool isInBytes) const {
         if (isNull()) {
+            // Always reset all the bits regardless of the actual length of the value
+            // 1 additional byte for the length prefix
+            ::memset(storage, 0, maxLength + 1);
+
             /*
              * The 7th bit of the length preceding value
              * is used to indicate that the object is null.
@@ -1530,6 +1581,10 @@ class NValue {
             const int32_t objLength = getObjectLength_withoutNull();
             const char* ptr = reinterpret_cast<const char*>(getObjectValue_withoutNull());
             checkTooNarrowVarcharAndVarbinary(m_valueType, ptr, objLength, maxLength, isInBytes);
+
+            // Always reset all the bits regardless of the actual length of the value
+            // 1 additional byte for the length prefix
+            ::memset(storage, 0, maxLength + 1);
 
             if (m_sourceInlined)
             {
@@ -2201,6 +2256,12 @@ class NValue {
         return retval;
     }
 
+    static NValue getBooleanValue(bool value) {
+        NValue retval(VALUE_TYPE_BOOLEAN);
+        retval.getBoolean() = value;
+        return retval;
+    }
+
     static NValue getDecimalValueFromString(const std::string &value) {
         NValue retval(VALUE_TYPE_DECIMAL);
         retval.createDecimalFromString(value);
@@ -2283,6 +2344,10 @@ class NValue {
         *reinterpret_cast<void**>(retval.m_data) = address;
         return retval;
     }
+
+    /// Common code to implement variants of the TRIM SQL function: LEADING, TRAILING, or BOTH
+    static NValue trimWithOptions(const std::vector<NValue>& arguments, bool leading, bool trailing);
+
 };
 
 /**
@@ -2401,6 +2466,8 @@ inline uint16_t NValue::getTupleStorageSize(const ValueType type) {
         return sizeof(char*);
       case VALUE_TYPE_DECIMAL:
         return sizeof(TTInt);
+      case VALUE_TYPE_BOOLEAN:
+        return sizeof(bool);
       default:
           char message[128];
           snprintf(message, 128, "NValue::getTupleStorageSize() unsupported type '%s'",
@@ -2828,6 +2895,9 @@ template <TupleSerializationFormat F, Endianess E> inline void NValue::deseriali
         const int8_t lengthLength = getAppropriateObjectLengthLength(length);
         // the NULL SQL string is a NULL C pointer
         if (isInlined) {
+            // Always reset the bits regardless of how long the actual value is.
+            ::memset(storage, 0, lengthLength + maxLength);
+
             setObjectLengthToLocation(length, storage);
             if (length == OBJECTLENGTH_NULL) {
                 break;
@@ -2864,10 +2934,17 @@ template <TupleSerializationFormat F, Endianess E> inline void NValue::deseriali
                 throwFatalException("Unexpected number of precision bytes %d", precisionBytes);
             }
         }
-        int64_t *longStorage = reinterpret_cast<int64_t*>(storage);
+        uint64_t *longStorage = reinterpret_cast<uint64_t*>(storage);
         //Reverse order for Java BigDecimal BigEndian
         longStorage[1] = input.readLong();
         longStorage[0] = input.readLong();
+
+        if (F == TUPLE_SERIALIZATION_DR) {
+            // Serialize to export serializes them in network byte order, have to reverse them here
+            longStorage[0] = ntohll(longStorage[0]);
+            longStorage[1] = ntohll(longStorage[1]);
+        }
+
         break;
     }
     default:

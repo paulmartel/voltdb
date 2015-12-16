@@ -28,14 +28,272 @@ package vmcTest.pages
  * page, which is the VoltDB web UI (replacing the old Catalog Report).
  */
 class SchemaPage extends VoltDBManagementCenterPage {
-    //static content = {
-        //schemaTab { $('#navSchema') }
-        //schemaLink   { schemaTab.find('a') }
-    //}
+    static content = {
+        schemaTabs  { $('#catalogNavlist') }
+        overviewTab { schemaTabs.find('#o-nav') }
+        schemaSubTab    { schemaTabs.find('#s-nav') }
+        proceduresTab   { schemaTabs.find('#p-nav') }
+        sizeTab     { schemaTabs.find('#z-nav') }
+        ddlTab      { schemaTabs.find('#d-nav') }
+        overviewLink    (to: SchemaPageOverviewTab) { overviewTab.find('a') }
+        schemaSubLink   (to: SchemaPageSchemaTab)   { schemaSubTab.find('a') }
+        proceduresLink  (to: SchemaPageProceduresAndSqlTab) { proceduresTab.find('a') }
+        sizeLink    (to: SchemaPageSizeWorksheetTab){ sizeTab.find('a') }
+        ddlLink     (to: SchemaPageDdlSourceTab)    { ddlTab.find('a') }
+        voltDbDocumentationLink { $('a#iconDoc') }
+        refreshbutton 		{ $(class:"refreshBtn schm", text:"Refresh") }
+    }
+
+
     static at = {
         schemaTab.displayed
         schemaTab.attr('class') == 'active'
-        // TODO: add a few key elements, that should always appear
+        overviewLink.displayed
+        schemaSubLink.displayed
+        proceduresLink.displayed
+        sizeLink.displayed
+        ddlLink.displayed
     }
 
+    /**
+     * Returns true if the current page is a SchemaPage and the current tab
+     * open on that page is the "Overview" tab (i.e., the "Overview" tab of
+     * the "Schema" tab of the VoltDB Management Center page is currently
+     * open).
+     * @return true if a SchemaPage's "Overview" tab is currently open.
+     */
+    def boolean isSchemaPageOverviewTabOpen() {
+        int count = 0
+        while (count<10) {
+            count++
+            try {
+                if (isSchemaPageOpen() && overviewTab.attr('class') == 'active') {
+                    return true
+                } else {
+                    return false
+                }
+            } catch(org.openqa.selenium.StaleElementReferenceException e) {
+                
+            }
+        }
+    }
+
+    /**
+     * Returns true if the current page is a SchemaPage and the current tab
+     * open on that page is the "Schema" tab (i.e., the "Schema" tab of the
+     * "Schema" tab of the VoltDB Management Center page is currently open).
+     * @return true if a SchemaPage's "Schema" tab is currently open.
+     */
+    def boolean isSchemaPageSchemaTabOpen() {
+        int count = 0
+        while (count<10) {
+            count++
+            try {
+                if (isSchemaPageOpen() && schemaSubTab.attr('class') == 'active') {
+                    return true
+                } else {
+                    return false
+                }
+            } catch(org.openqa.selenium.StaleElementReferenceException e) {
+                
+            }
+        }
+    }
+
+    /**
+     * Returns true if the current page is a SchemaPage and the current tab
+     * open on that page is the "Procedures & SQL" tab (i.e., the "Procedures
+     * & SQL" tab of the "Schema" tab of the VoltDB Management Center page is
+     * currently open).
+     * @return true if a SchemaPage's "Procedures & SQL" tab is currently open.
+     */
+    def boolean isSchemaPageProceduresAndSqlTabOpen() {
+        int count = 0
+        while (count<10) {
+            count++
+            try {
+                if (isSchemaPageOpen() && proceduresTab.attr('class') == 'active') {
+                    return true
+                } else {
+                    return false
+                }
+            } catch(org.openqa.selenium.StaleElementReferenceException e) {
+                
+            }
+        }
+    }
+
+    /**
+     * Returns true if the current page is a SchemaPage and the current tab
+     * open on that page is the "Size Worksheet" tab (i.e., the "Size Worksheet"
+     * tab of the "Schema" tab of the VoltDB Management Center page is currently
+     * open).
+     * @return true if a SchemaPage's "Size Worksheet" tab is currently open.
+     */
+    def boolean isSchemaPageSizeWorksheetTabOpen() {
+        int count = 0
+        while (count<10) {
+            count++
+            try {
+                if (isSchemaPageOpen() && sizeTab.attr('class') == 'active') {
+                    return true
+                } else {
+                    return false
+                }
+            } catch(org.openqa.selenium.StaleElementReferenceException e) {
+                
+            }
+        }
+    }
+
+    /**
+     * Returns true if the current page is a SchemaPage and the current tab
+     * open on that page is the "DDL Source" tab (i.e., the "DDL Source" tab
+     * of the "Schema" tab of the VoltDB Management Center page is currently
+     * open).
+     * @return true if a SchemaPage's "DDL Source" tab is currently open.
+     */
+    def boolean isSchemaPageDdlSourceTabOpen() {
+        int count = 0
+        while (count<10) {
+            count++
+            try {
+                if (isSchemaPageOpen() && ddlTab.attr('class') == 'active') {
+                    return true
+                } else {
+                    return false
+                }
+            } catch(org.openqa.selenium.StaleElementReferenceException e) {
+                
+            }
+        }
+    }
+
+    /**
+     * Clicks the "Overview" link, opening the "Overview" tab, on the "Schema"
+     * page (or tab); if the "Overview" tab is already open, no action is taken.
+     */
+    def void openSchemaPageOverviewTab() {
+        if (!isSchemaPageOverviewTabOpen()) {
+            overviewLink.click()
+        }
+    }
+
+    /**
+     * Clicks the "Schema" (sub-)link, opening the "Schema" tab, on the "Schema"
+     * page (or tab); if the "Schema" tab is already open, no action is taken.
+     */
+    def void openSchemaPageSchemaTab() {
+        if (!isSchemaPageSchemaTabOpen()) {
+            schemaSubLink.click()
+        }
+    }
+
+    /**
+     * Clicks the "Procedures & SQL" link, opening the "Procedures & SQL" tab,
+     * on the "Schema" page (or tab); if the "Procedures & SQL" tab is already
+     * open, no action is taken.
+     */
+    def void openSchemaPageProceduresAndSqlTab() {
+        if (!isSchemaPageProceduresAndSqlTabOpen()) {
+            proceduresLink.click()
+        }
+    }
+
+    /**
+     * Clicks the "Size Worksheet" link, opening the "Size Worksheet" tab, on
+     * the "Schema" page (or tab); if the "Size Worksheet" tab is already open,
+     * no action is taken.
+     */
+    def void openSchemaPageSizeWorksheetTab() {
+        if (!isSchemaPageSizeWorksheetTabOpen()) {
+            sizeLink.click()
+        }
+    }
+
+    /**
+     * Clicks the "DDL Source" link, opening the "DDL Source" tab, on the
+     * "Schema" page (or tab); if the "DDL Source" tab is already open, no
+     * action is taken.
+     */
+    def void openSchemaPageDdlSourceTab() {
+        if (!isSchemaPageDdlSourceTabOpen()) {
+            ddlLink.click()
+        }
+    }
+
+
+
+    /*
+     * get query to create a table
+     */
+    def String getQueryToCreateTable() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/sqlQueryDbMonitor.txt"));
+        String line;
+        String query = ""
+
+        while((line = br.readLine()) != "#create") {
+        }
+
+        while ((line = br.readLine()) != "#delete") {
+            // process the line.
+            query = query + line + "\n"
+        }
+
+        return query
+    }
+
+    /*
+     * get query to delete a table
+     */
+    def String getQueryToDeleteTable() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/sqlQueryDbMonitor.txt"));
+        String line;
+        String query = ""
+
+        while((line = br.readLine()) != "#delete") {
+        }
+
+        while ((line = br.readLine()) != "#name") {
+            // process the line.
+            query = query + line + "\n"
+        }
+
+        return query
+    }
+
+    /*
+     * get tablename that is created and deleted
+     */
+
+    def String getTablename() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/sqlQueryDbMonitor.txt"));
+        String line;
+        String query = ""
+
+        while((line = br.readLine()) != "#name") {
+        }
+
+        while ((line = br.readLine()) != null) {
+            query = query + line + "\n"
+        }
+
+        return query
+    }
+
+    /*
+     * click SQL query to go to SQL query
+     */
+
+    def boolean gotoSqlQuery() {
+        header.tabSQLQuery.click()
+    }
+
+    /*
+     * click schema tab to go to Schema tab
+     */
+
+    def boolean gotoSchemaSubTab() {
+        schemaSubLink.click()
+    }
 }

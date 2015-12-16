@@ -73,6 +73,9 @@ public class CompiledPlan {
     /** Parameter values, if the planner pulled constants out of the plan */
     private ParameterSet m_extractedParamValues = ParameterSet.emptyParameterSet();
 
+    /** Compiler generated parameters for cacheble AdHoc queries */
+    private int m_generatedParameterCount = 0;
+
     /**
      * If true, divide the number of tuples changed
      * by the number of partitions, as the number will
@@ -93,22 +96,37 @@ public class CompiledPlan {
      */
     private boolean m_statementIsOrderDeterministic = false;
 
+    /**
+     * This string describes the reason a plan is not content deterministic.
+     * This is non-null iff the statement has some calculation which is in
+     * itself content non-deterministic. The most typical example is an
+     * aggregate of a column whose type is floating point. The floating point
+     * arithmetic may be slightly different with different plans or different
+     * row orders.
+     */
+    private String m_contentDeterminismDetail = null;
+
     /** Which extracted param is the partitioning object (assuming parameterized plans) */
     public int partitioningKeyIndex = -1;
 
     private Object m_partitioningValue;
 
-    void resetPlanNodeIds() {
-        int nextId = resetPlanNodeIds(rootPlanGraph, 1);
+    private StatementPartitioning m_partitioning = null;
+
+    public int resetPlanNodeIds(int startId) {
+        int nextId = resetPlanNodeIds(rootPlanGraph, startId);
         if (subPlanGraph != null) {
-            resetPlanNodeIds(subPlanGraph, nextId);
+            nextId = resetPlanNodeIds(subPlanGraph, nextId);
         }
+        return nextId;
     }
 
     private int resetPlanNodeIds(AbstractPlanNode node, int nextId) {
-        node.overrideId(nextId++);
+        nextId = node.overrideId(nextId);
         for (AbstractPlanNode inNode : node.getInlinePlanNodes().values()) {
-            inNode.overrideId(0);
+            // Inline nodes also need their ids to be overridden to make sure
+            // the subquery node ids are also globaly unique
+            nextId = resetPlanNodeIds(inNode, nextId);
         }
 
         for (int i = 0; i < node.getChildCount(); i++) {
@@ -121,12 +139,17 @@ public class CompiledPlan {
     }
 
     /**
-     * Mark the level of result determinism imposed by the statement,
-     * which can save us from a difficult determination based on the plan graph.
+     * Mark the level of result determinism imposed by the statement, which can
+     * save us from a difficult determination based on the plan graph.
      */
-    public void statementGuaranteesDeterminism(boolean hasLimitOrOffset, boolean order) {
+    public void statementGuaranteesDeterminism(boolean hasLimitOrOffset,
+                                               boolean order,
+                                               String contentDeterminismDetail) {
         m_statementHasLimitOrOffset = hasLimitOrOffset;
         m_statementIsOrderDeterministic = order;
+        if (contentDeterminismDetail != null) {
+            m_contentDeterminismDetail = contentDeterminismDetail;
+        }
     }
 
     /**
@@ -141,13 +164,20 @@ public class CompiledPlan {
         return rootPlanGraph.isOrderDeterministic();
     }
 
+    public boolean isContentDeterministic() {
+        return m_contentDeterminismDetail == null;
+    }
+
     /**
-     * Accessor for flag marking the original statement as guaranteeing an identical result/effect
-     * when "replayed" against the same database state, such as during replication or CL recovery.
+     * Accessor for flag marking the original statement as guaranteeing an
+     * identical result/effect when "replayed" against the same database state,
+     * such as during replication or CL recovery. If
+     * m_statementIsContentDeterministic is false we want to check this. This is
+     * the one area in which content and limit-order determinism interact.
      */
     public boolean hasDeterministicStatement()
     {
-        return m_statementIsOrderDeterministic;
+        return m_statementIsOrderDeterministic && isContentDeterministic();
     }
 
     /**
@@ -160,10 +190,15 @@ public class CompiledPlan {
     }
 
     /**
-     * Accessor for description of plan non-determinism.
+     * Accessor for description of plan non-determinism. Note that we prefer the
+     * content determinism message to the rootPlanGraph's message.
+     *
      * @return the corresponding value from the first fragment
      */
     public String nondeterminismDetail() {
+        if (!isContentDeterministic()) {
+            return m_contentDeterminismDetail;
+        }
         return rootPlanGraph.nondeterminismDetail();
     }
 
@@ -277,6 +312,10 @@ public class CompiledPlan {
         if (paramTypes.length > MAX_PARAM_COUNT) {
             return false;
         }
+        if (paramzInfo.paramLiteralValues != null) {
+            m_generatedParameterCount = paramzInfo.paramLiteralValues.length;
+        }
+
         m_extractedParamValues = paramzInfo.extractedParamValues(paramTypes);
         return true;
     }
@@ -285,11 +324,33 @@ public class CompiledPlan {
         return m_extractedParamValues;
     }
 
-    public boolean getReadOnly() {
+    public boolean isReadOnly() {
         return m_readOnly;
     }
 
     public void setReadOnly(boolean newValue) {
         m_readOnly = newValue;
+    }
+
+    public void setStatementPartitioning(StatementPartitioning partitioning) {
+        m_partitioning = partitioning;
+    }
+
+    public StatementPartitioning getStatementPartitioning() {
+        return m_partitioning;
+    }
+
+    @Override
+    public String toString() {
+        if (rootPlanGraph != null) {
+            return "CompiledPlan: \n" + rootPlanGraph.toExplainPlanString();
+        }
+        else {
+            return "CompiledPlan: [null plan graph]";
+        }
+    }
+
+    public void setNondeterminismDetail(String contentDeterminismMessage) {
+        m_contentDeterminismDetail = contentDeterminismMessage;
     }
 }

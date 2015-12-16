@@ -23,7 +23,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import org.HdrHistogram_voltpatches.AbstractHistogram;
-import org.HdrHistogram_voltpatches.Histogram;
 import org.cliffc_voltpatches.high_scale_lib.NonBlockingHashMap;
 import org.voltcore.logging.VoltLogger;
 import org.voltdb.dtxn.InitiatorStats.InvocationInfo;
@@ -233,6 +232,14 @@ public class AdmissionControlGroup implements org.voltcore.network.QueueMonitor
      */
     public boolean hasBackPressure() {
         return m_hadBackPressure;
+    }
+
+    /**
+     * Used by tests.
+     * @return
+     */
+    public long getPendingBytes() {
+        return m_pendingTxnBytes;
     }
 
     /*

@@ -19,6 +19,7 @@
 #define TOPEND_H_
 #include "common/ids.h"
 #include "common/FatalException.hpp"
+#include "common/types.h"
 
 #include <string>
 #include <queue>
@@ -45,9 +46,12 @@ class Topend {
     // query to stop.
     // Return 0 if the Topend wants the EE to stop processing the current fragment
     // or the number of tuples the EE should process before repeating this call.
-    virtual int64_t fragmentProgressUpdate(int32_t batchIndex, std::string planNodeName,
-                std::string targetTableName, int64_t targetTableSize, int64_t tuplesProcessed,
-                int64_t currMemoryInBytes, int64_t peakMemoryInBytes) = 0;
+    virtual int64_t fragmentProgressUpdate(
+                int32_t batchIndex,
+                PlanNodeType planNodeType,
+                int64_t tuplesProcessed,
+                int64_t currMemoryInBytes,
+                int64_t peakMemoryInBytes) = 0;
 
     virtual std::string planForFragmentId(int64_t fragmentId) = 0;
 
@@ -62,7 +66,13 @@ class Topend {
             bool sync,
             bool endOfStream) = 0;
 
-    virtual void pushDRBuffer(int32_t partitionId, StreamBlock *block) = 0;
+    virtual int64_t pushDRBuffer(int32_t partitionId, StreamBlock *block) = 0;
+
+    virtual int reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp, std::string tableName, DRRecordType action,
+            DRConflictType deleteConflict, Table *existingMetaTableForDelete, Table *existingTupleTableForDelete,
+            Table *expectedMetaTableForDelete, Table *expectedTupleTableForDelete,
+            DRConflictType insertConflict, Table *existingMetaTableForInsert, Table *existingTupleTableForInsert,
+            Table *newMetaTableForInsert, Table *newTupleTableForInsert) = 0;
 
     virtual void fallbackToEEAllocatedBuffer(char *buffer, size_t length) = 0;
 
@@ -81,9 +91,12 @@ public:
     int loadNextDependency(
         int32_t dependencyId, voltdb::Pool *pool, Table* destination);
 
-    virtual int64_t fragmentProgressUpdate(int32_t batchIndex, std::string planNodeName,
-            std::string targetTableName, int64_t targetTableSize, int64_t tuplesFound,
-            int64_t currMemoryInBytes, int64_t peakMemoryInBytes);
+    virtual int64_t fragmentProgressUpdate(
+            int32_t batchIndex,
+            PlanNodeType planNodeType,
+            int64_t tuplesFound,
+            int64_t currMemoryInBytes,
+            int64_t peakMemoryInBytes);
 
     std::string planForFragmentId(int64_t fragmentId);
 
@@ -93,7 +106,13 @@ public:
 
     virtual void pushExportBuffer(int64_t generation, int32_t partitionId, std::string signature, StreamBlock *block, bool sync, bool endOfStream);
 
-    void pushDRBuffer(int32_t partitionId, voltdb::StreamBlock *block);
+    int64_t pushDRBuffer(int32_t partitionId, voltdb::StreamBlock *block);
+
+    int reportDRConflict(int32_t partitionId, int32_t remoteClusterId, int64_t remoteTimestamp, std::string tableName, DRRecordType action,
+            DRConflictType deleteConflict, Table *existingMetaTableForDelete, Table *existingTupleTableForDelete,
+            Table *expectedMetaTableForDelete, Table *expectedTupleTableForDelete,
+            DRConflictType insertConflict, Table *existingMetaTableForInsert, Table *existingTupleTableForInsert,
+            Table *newMetaTableForInsert, Table *newTupleTableForInsert);
 
     void fallbackToEEAllocatedBuffer(char *buffer, size_t length);
 
@@ -105,7 +124,18 @@ public:
     std::vector<boost::shared_array<char> > data;
     bool receivedDRBuffer;
     bool receivedExportBuffer;
-
+    int64_t pushDRBufferRetval;
+    DRRecordType actionType;
+    DRConflictType deleteConflictType;
+    DRConflictType insertConflictType;
+    boost::shared_ptr<Table> existingMetaRowsForDelete;
+    boost::shared_ptr<Table> existingTupleRowsForDelete;
+    boost::shared_ptr<Table> expectedMetaRowsForDelete;
+    boost::shared_ptr<Table> expectedTupleRowsForDelete;
+    boost::shared_ptr<Table> existingMetaRowsForInsert;
+    boost::shared_ptr<Table> existingTupleRowsForInsert;
+    boost::shared_ptr<Table> newMetaRowsForInsert;
+    boost::shared_ptr<Table> newTupleRowsForInsert;
 };
 
 }

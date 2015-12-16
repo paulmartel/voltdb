@@ -23,6 +23,7 @@
 
 package vmcTest.tests
 
+import geb.*
 import groovy.json.*
 import java.util.List;
 import java.util.Map;
@@ -33,21 +34,63 @@ import vmcTest.pages.*
  * This class contains tests of the 'SQL Query' tab of the VoltDB Management
  * Center (VMC) page, which is the VoltDB (new) web UI.
  */
-class SqlQueriesTest extends TestBase {
 
-    static final boolean INSERT_JSON_VALUES = false
-    static final int NUM_ROWS_TO_INSERT = 4
+class SqlQueriesTest extends SqlQueriesTestBase {
+
+    static final int DEFAULT_NUM_ROWS_TO_INSERT = 2
+    static final boolean DEFAULT_INSERT_JSON = false
 
     static final String SQL_QUERY_FILE = 'src/resources/sqlQueries.txt';
+
+    // Files used to determine the expected Tables, Views, and (Default and
+    // User-defiled) Stored Procedures, when running the Voter example app
+    static final String VOTER_TABLES_FILE = 'src/resources/expectedVoterTables.txt';
+    static final String VOTER_VIEWS_FILE  = 'src/resources/expectedVoterViews.txt';
+    static final String VOTER_DEFAULT_STORED_PROCS_FILE = 'src/resources/expectedVoterDefaultStoredProcs.txt';
+    static final String VOTER_USER_STORED_PROCS_FILE    = 'src/resources/expectedVoterUserStoredProcs.txt';
+
+    // Files used to determine the expected Tables, Views, and (Default and
+    // User-defiled) Stored Procedures, when running the Genqa test app
+    static final String GENQA_TABLES_FILE = 'src/resources/expectedGenqaTables.txt';
+    static final String GENQA_VIEWS_FILE  = 'src/resources/expectedGenqaViews.txt';
+    static final String GENQA_DEFAULT_STORED_PROCS_FILE = 'src/resources/expectedGenqaDefaultStoredProcs.txt';
+    static final String GENQA_USER_STORED_PROCS_FILE    = 'src/resources/expectedGenqaUserStoredProcs.txt';
+
+    // Files used to determine the expected Tables, Views, and (Default and
+    // User-defiled) Stored Procedures, when running the GEB VMC test server
+    // (which is the default; see voltdb/tests/geb/vmc/server/run_voltdb_server.sh)
     static final String TABLES_FILE = 'src/resources/expectedTables.txt';
     static final String VIEWS_FILE  = 'src/resources/expectedViews.txt';
-    static final String SYSTEM_STORED_PROCS_FILE  = 'src/resources/expectedSystemStoredProcs.txt';
     static final String DEFAULT_STORED_PROCS_FILE = 'src/resources/expectedDefaultStoredProcs.txt';
     static final String USER_STORED_PROCS_FILE    = 'src/resources/expectedUserStoredProcs.txt';
+    static final String SYSTEM_STORED_PROCS_FILE  = 'src/resources/expectedSystemStoredProcs.txt';
+
+    // Values used to determine which app we are running
+    static final List<String> VOTER_TEST_TABLES   = ['AREA_CODE_STATE', 'CONTESTANTS', 'VOTES']
+    static final List<String> GENQA_TEST_TABLES   = ['EXPORT_MIRROR_PARTITIONED_TABLE', 'PARTITIONED_TABLE', 'REPLICATED_TABLE']
+    static final List<String> GENQA_TEST_USER_STORED_PROCS = ['JiggleExportDoneTable', 'JiggleExportSinglePartition',
+                                                              'JiggleSkinnyExportSinglePartition']
+
+    // Names of standard tables that are needed for testing (these names
+    // originally came from the 'Genqa' test app, but are now also used
+    // by the default GEB VMC test server)
+    static final List<String> STANDARD_TEST_TABLES = ['PARTITIONED_TABLE', 'REPLICATED_TABLE']
+    // Indicates the partitioning column (if any) for the corresponding table
+    static final List<String> STANDARD_TEST_TABLE_PARTITION_COLUMN = ['rowid', null]
+    // Indicates whether the corresponding table has been created
+    static List<Boolean> createdStandardTestTable = [false, false]
 
     static List<String> savedTables = []
     static List<String> savedViews = []
+    static Boolean initialized  = false;
+    static Boolean runningVoter = null;
     static Boolean runningGenqa = null;
+    static Boolean runningVmcTestSever = null;
+
+    @Shared String tablesFileName = TABLES_FILE
+    @Shared String viewsFileName  = VIEWS_FILE
+    @Shared String defaultStoredProcsFileName = DEFAULT_STORED_PROCS_FILE
+    @Shared String userStoredProcsFileName    = USER_STORED_PROCS_FILE
 
     @Shared def sqlQueriesFile = new File(SQL_QUERY_FILE)
     @Shared def tablesFile = new File(TABLES_FILE)
@@ -55,7 +98,7 @@ class SqlQueriesTest extends TestBase {
     @Shared def systemStoredProcsFile  = new File(SYSTEM_STORED_PROCS_FILE)
     @Shared def defaultStoredProcsFile = new File(DEFAULT_STORED_PROCS_FILE)
     @Shared def userStoredProcsFile    = new File(USER_STORED_PROCS_FILE)
-    
+
     @Shared def sqlQueryLines = []
     @Shared def tableLines = []
     @Shared def viewLines  = []
@@ -64,37 +107,95 @@ class SqlQueriesTest extends TestBase {
     @Shared def userStoredProcLines = []
 
     @Shared def fileLinesPairs = [
-        [sqlQueriesFile, sqlQueryLines],
-        [tablesFile, tableLines],
-        [viewsFile, viewLines],
-        [systemStoredProcsFile, systemStoredProcLines],
-        [defaultStoredProcsFile, defaultStoredProcLines],
-        [userStoredProcsFile, userStoredProcLines],
+            [sqlQueriesFile, sqlQueryLines],
+            [tablesFile, tableLines],
+            [viewsFile, viewLines],
+            [systemStoredProcsFile, systemStoredProcLines],
+            [defaultStoredProcsFile, defaultStoredProcLines],
+            [userStoredProcsFile, userStoredProcLines],
     ]
     @Shared def slurper = new JsonSlurper()
 
     def setupSpec() { // called once, before any tests
-        // Move contents of various test files into memory
-        def getFileLines = {file,lines -> 
-            if(file.size() > 0) {
-                file.eachLine {
-                    line -> if (!line.trim().startsWith('#')) { lines.add(line) }
-                }
-            }
+
+        // Move the contents of the various files into memory
+        readFiles(false)
+
+        // Get the list of tests that we actually want to run
+        // (if empty, run all tests)
+        String sqlTestsProperty = System.getProperty('sqlTests', '')
+        debugPrint '\nsqlTestsProperty: ' + sqlTestsProperty
+        def sqlTests = []
+        if (sqlTestsProperty) {
+            sqlTests = Arrays.asList(sqlTestsProperty.split(','))
         }
-        fileLinesPairs.each { getFileLines(*it) }
+        debugPrint 'sqlTests:\n' + sqlTests
+        debugPrint 'sqlTests.isEmpty(): ' + sqlTests.isEmpty()
+
+        // If specific test names to run were specified, prune out all others
+        if (sqlTests) {
+            sqlQueryLines.retainAll { line -> sqlTests.find { name -> line.contains(name) } }
+            debugPrint '\nsqlQueryLines:\n' + sqlQueryLines
+        }
     }
 
     def setup() { // called before each test
-        setup: 'Open VMC page'
-        to VoltDBManagementCenterPage
-        expect: 'to be on VMC page'
-        at VoltDBManagementCenterPage
+        // SqlQueriesTestBase.setup gets called first (automatically)
 
-        when: 'click the SQL Query link (if needed)'
-        page.openSqlQueryPage()
-        then: 'should be on SQL Query page'
-        at SqlQueryPage
+        // Initializations that can only occur after we are on a SqlQueryPage
+        // (which we are not, when running setupSpec)
+        if (!initialized) {
+            initialized = true
+            // Determine whether we are running against the Genqa test app or the Voter
+            // example app; otherwise, we assume we are running against the default GEB
+            // VMC test server (see voltdb/tests/geb/vmc/server/run_voltdb_server.sh)
+            if (isRunningVoter(page)) {
+                tablesFileName = VOTER_TABLES_FILE
+                viewsFileName = VOTER_VIEWS_FILE
+                defaultStoredProcsFileName = VOTER_DEFAULT_STORED_PROCS_FILE
+                userStoredProcsFileName = VOTER_USER_STORED_PROCS_FILE
+                tablesFile = new File(tablesFileName)
+                viewsFile  = new File(viewsFileName)
+                defaultStoredProcsFile = new File(defaultStoredProcsFileName)
+                userStoredProcsFile    = new File(userStoredProcsFileName)
+                readFiles()  // reinitialize the file data we just changed
+            } else if (isRunningGenqa(page)) {
+                tablesFileName = GENQA_TABLES_FILE
+                viewsFileName = GENQA_VIEWS_FILE
+                defaultStoredProcsFileName = GENQA_DEFAULT_STORED_PROCS_FILE
+                userStoredProcsFileName = GENQA_USER_STORED_PROCS_FILE
+                tablesFile = new File(tablesFileName)
+                viewsFile  = new File(viewsFileName)
+                defaultStoredProcsFile = new File(defaultStoredProcsFileName)
+                userStoredProcsFile    = new File(userStoredProcsFileName)
+                readFiles()  // reinitialize the file data we just changed
+            }
+        }
+
+        // Create standard tables, needed for testing (e.g. PARTITIONED_TABLE,
+        // REPLICATED_TABLE), if they don't already exist
+        boolean createdNewTable = false;
+        for (int i=0; i < STANDARD_TEST_TABLES.size(); i++) {
+            if (!createdStandardTestTable.get(i)) {
+                createdStandardTestTable.set(i, createTableIfDoesNotExist(page, STANDARD_TEST_TABLES.get(i),
+                        STANDARD_TEST_TABLE_PARTITION_COLUMN.get(i)))
+                createdNewTable = createdNewTable || createdStandardTestTable.get(i)
+            }
+        }
+        // If new table(s) created, refresh the page, and therby the list of tables
+        if (createdNewTable) {
+            driver.navigate().refresh()
+        }
+    }
+
+    def cleanupSpec() { // called once, after all the tests
+        // Drop any tables that were created in setup()
+        for (int i=0; i < STANDARD_TEST_TABLES.size(); i++) {
+            if (createdStandardTestTable.get(i)) {
+                ensureOnSqlQueryPage()
+                runQuery(page, 'Drop table ' + STANDARD_TEST_TABLES.get(i) + ';')
+            }
+        }
     }
 
     /**
@@ -106,9 +207,6 @@ class SqlQueriesTest extends TestBase {
     static List<String> getTables(SqlQueryPage sqp) {
         if (savedTables == null || savedTables.isEmpty()) {
             savedTables = sqp.getTableNames()
-        }
-        if (runningGenqa == null) {
-            runningGenqa = savedTables.containsAll(["PARTITIONED_TABLE", "REPLICATED_TABLE"])
         }
         return savedTables
     }
@@ -127,26 +225,106 @@ class SqlQueriesTest extends TestBase {
     }
 
     /**
-     * Runs, on the specified SqlQueryPage, the specified query, and returns
-     * the result. (Also, if DEBUG is true, prints: the query, the result, an
-     * error message, if any, and the query duration.)
-     * @param sqp - the SqlQueryPage on which to run the query.
-     * @param query - the query to be run.
-     * @return the query result (as a Map of Lists of Strings).
+     * Reads the contents of various input files, and loads their lines into
+     * memory, in the form of various list of lines from each file.
+     * @param clearValues - whether or not to empty the list of lines read from
+     * each file, before loading them (again); default is <b>true</b>.
      */
-    static Map<String,List<String>> runQuery(SqlQueryPage sqp, String query) {
-        sqp.runQuery(query)
-        def qResult = sqp.getQueryResult()
-
-        debugPrint "\nQuery:\n  " + query
-        debugPrint "Result:\n  " + qResult
-        def error = sqp.getQueryError()
-        if (error != null) {
-            debugPrint "Error: " + error
+    def readFiles(clearValues=true) {
+        if (clearValues) {
+            sqlQueryLines = []
+            tableLines = []
+            viewLines  = []
+            systemStoredProcLines = []
+            defaultStoredProcLines = []
+            userStoredProcLines = []
+            fileLinesPairs = [
+                [sqlQueriesFile, sqlQueryLines],
+                [tablesFile, tableLines],
+                [viewsFile, viewLines],
+                [systemStoredProcsFile, systemStoredProcLines],
+                [defaultStoredProcsFile, defaultStoredProcLines],
+                [userStoredProcsFile, userStoredProcLines],
+            ]
         }
-        debugPrint "Duration: " + sqp.getQueryDuration()
+        // Move contents of the various files into memory
+        fileLinesPairs.each { file, lines -> lines.addAll(getFileLines(file, '#', false, (file == sqlQueriesFile ? '}' : ''))) }
+    }
 
-        return qResult
+    /**
+     * Creates a table with the specified name, if that table does not already
+     * exist in the database, and with the column names and types found in the
+     * PARTITIONED_TABLE and REPLICATED_TABLE, in the 'genqa' test app.
+     * @param sqp - the SqlQueryPage from which to get the list of view names.
+     * @param sqp - the name of the table to be created (if necessary).
+     * @return the list of view names, as displayed on the page.
+     */
+    def boolean createTableIfDoesNotExist(SqlQueryPage sqp, String tableName, String partitionColumn='') {
+        if (getTables(sqp).contains(tableName)) {
+            return false
+        } else {
+            String ddl = 'Create table ' + tableName + ' (\n' +
+                    '  rowid                     BIGINT        NOT NULL,\n' +
+                    '  rowid_group               TINYINT       NOT NULL,\n' +
+                    '  type_null_tinyint         TINYINT,\n' +
+                    '  type_not_null_tinyint     TINYINT       NOT NULL,\n' +
+                    '  type_null_smallint        SMALLINT,\n' +
+                    '  type_not_null_smallint    SMALLINT      NOT NULL,\n' +
+                    '  type_null_integer         INTEGER,\n' +
+                    '  type_not_null_integer     INTEGER       NOT NULL,\n' +
+                    '  type_null_bigint          BIGINT,\n' +
+                    '  type_not_null_bigint      BIGINT        NOT NULL,\n' +
+                    '  type_null_timestamp       TIMESTAMP,\n' +
+                    '  type_not_null_timestamp   TIMESTAMP     NOT NULL,\n' +
+                    '  type_null_float           FLOAT,\n' +
+                    '  type_not_null_float       FLOAT         NOT NULL,\n' +
+                    '  type_null_decimal         DECIMAL,\n' +
+                    '  type_not_null_decimal     DECIMAL       NOT NULL,\n' +
+                    '  type_null_varchar25       VARCHAR(32),\n' +
+                    '  type_not_null_varchar25   VARCHAR(32)   NOT NULL,\n' +
+                    '  type_null_varchar128      VARCHAR(128),\n' +
+                    '  type_not_null_varchar128  VARCHAR(128)  NOT NULL,\n' +
+                    '  type_null_varchar1024     VARCHAR(1024),\n' +
+                    '  type_not_null_varchar1024 VARCHAR(1024) NOT NULL,\n' +
+                    '  PRIMARY KEY (rowid)\n' +
+                    ');'
+            if (partitionColumn) {
+                ddl += '\nPartition table ' + tableName + ' on column ' + partitionColumn + ';'
+            }
+            runQuery(sqp, ddl)
+            // Ensure the list of tables will get updated, to include this new one
+            savedTables = null
+            return true
+        }
+    }
+
+    /**
+     * Returns whether or not we are currently running the 'voter' example app,
+     * based on whether the expected tables are listed on the page.
+     * @param sqp - the SqlQueryPage from which to get the list of table names.
+     * @return true if we are currently running the 'voter' example app.
+     */
+    static boolean isRunningVoter(SqlQueryPage sqp) {
+        if (runningVoter == null) {
+            runningVoter = getTables(sqp).containsAll(VOTER_TEST_TABLES)
+        }
+        return runningVoter
+    }
+
+    /**
+     * Returns whether or not we are currently running the 'genqa' test app,
+     * based on whether the expected tables and stored procedures are listed
+     * on the page.
+     * @param sqp - the SqlQueryPage from which to get the list of table names.
+     * @return true if we are currently running the 'genqa' test app.
+     */
+    static boolean isRunningGenqa(SqlQueryPage sqp) {
+        if (runningGenqa == null) {
+            runningGenqa =
+                    //getTables(sqp).containsAll(GENQA_TEST_TABLES) &&
+                    sqp.getUserStoredProcedures().containsAll(GENQA_TEST_USER_STORED_PROCS)
+        }
+        return runningGenqa
     }
 
     /**
@@ -160,13 +338,16 @@ class SqlQueriesTest extends TestBase {
      * @param tableOrView - this should be "Table" or "View" - whichever is
      * contained in the list.
      */
-    static def queryFrom(SqlQueryPage sqp, List<String> tables, String tableOrView) {
+    def queryFrom(SqlQueryPage sqp, List<String> tables, String tableOrView) {
         tables.each {
-            def columnNames = sqp.getTableColumnNames(it)
-            def columnTypes = sqp.getTableColumnTypes(it)
+            def columnNames = null
+            def columnTypes = null
             if (tableOrView != null && tableOrView.equalsIgnoreCase("View")) {
                 columnNames = sqp.getViewColumnNames(it)
                 columnTypes = sqp.getViewColumnTypes(it)
+            } else {
+                columnNames = sqp.getTableColumnNames(it)
+                columnTypes = sqp.getTableColumnTypes(it)
             }
             debugPrint "\n" + tableOrView + ": " + it
             debugPrint "Column names: " + columnNames
@@ -184,7 +365,7 @@ class SqlQueriesTest extends TestBase {
      * @param sqp - the SqlQueryPage on which to run the query.
      * @param tables - the list of tables or views to be queried.
      */
-    static List<Integer> queryCount(SqlQueryPage sqp, List<String> tables) {
+    def List<Integer> queryCount(SqlQueryPage sqp, List<String> tables) {
         def cqResults = []
         tables.each {
             def result = runQuery(sqp, 'select count(*) as numrows from ' + it)
@@ -201,7 +382,7 @@ class SqlQueriesTest extends TestBase {
      * @param sqp - the SqlQueryPage on which to run the query.
      * @param tables - the list of tables (or views) to be queried.
      */
-    static def deleteFrom(SqlQueryPage sqp, List<String> tables) {
+    def deleteFrom(SqlQueryPage sqp, List<String> tables) {
         tables.each {
             runQuery(sqp, 'delete from ' + it)
         }
@@ -209,27 +390,33 @@ class SqlQueriesTest extends TestBase {
 
     /**
      * Runs, on the specified SqlQueryPage, and for each specified table (or
-     * view), the specified number of 'insert into ...' queries. (Also, if
-     * DEBUG is true, prints everything that runQuery prints, namely: the
-     * query, the result, an error message, if any, and the query duration.)
+     * view), the specified number of 'insert into ...' or 'upsert into ...'
+     * queries. (Also, if debugPrint is true, prints everything that runQuery
+     * prints, namely: the query, the result, an error message, if any, and
+     * the query duration.)
      * @param sqp - the SqlQueryPage on which to run the query.
      * @param tables - the list of tables (or views) to be queried.
+     * @param numToInsert - the number of rows to be inserted (or upserted).
+     * @param minIntValue - the minimum int value to be inserted (or upserted).
+     * @param insertOrUpsert - must be either 'insert' or 'upsert'.
      */
-    static def insertInto(SqlQueryPage sqp, List<String> tables, int numToInsert) {
+    def insertOrUpsertInto(SqlQueryPage sqp, List<String> tables, int numToInsert,
+                           int minIntValue, String insertOrUpsert) {
+        def insertJson = getBooleanSystemProperty('insertJson', DEFAULT_INSERT_JSON)
         tables.each {
             def columns = sqp.getTableColumns(it)
             def count = 0
             for (int i = 1; i <= numToInsert; i++) {
-                String query = "insert into " + it + " values ("
+                String query = insertOrUpsert + " into " + it + " values ("
                 for (int j = 0; j < columns.size(); j++) {
                     if (columns.get(j).contains('varchar')) {
-                        if (INSERT_JSON_VALUES) {
-                            query += (j > 0 ? ", " : "") + "'{\"id\":\"a" + i + "\"}'"
+                        if (insertJson) {
+                            query += (j > 0 ? ", " : "") + "'{\"id\":\"z" + i + "\"}'"
                         } else {
-                            query += (j > 0 ? ", " : "") + "'a" + i + "'"
+                            query += (j > 0 ? ", " : "") + "'z" + i + "'"
                         }
                     } else {
-                        query += (j > 0 ? ", " : "") + i
+                        query += (j > 0 ? ", " : "") + (minIntValue + i)
                     }
                 }
                 query += ")"
@@ -239,91 +426,183 @@ class SqlQueriesTest extends TestBase {
     }
 
     /**
-     * Runs delete from, insert into, query from, count query, and (again)
-     * delete from queries, for every Table listed on the SQL Query page of
-     * the VMC; and, when appropriate, for every View.<p>
-     * Note: unlike the '#testName' tests, this will run against any VoltDB
-     * database, since it gets the Table and View names from the UI.
+     * Runs, on the specified SqlQueryPage, and for each specified table (or
+     * view), the specified number of 'insert into ...' queries. (Also, if
+     * debugPrint is true, prints everything that runQuery prints, namely: the
+     * query, the result, an error message, if any, and the query duration.)
+     * @param sqp - the SqlQueryPage on which to run the query.
+     * @param tables - the list of tables (or views) to be queried.
+     * @param numToInsert - the number of rows to be inserted.
+     * @param minIntValue - the minimum int value to be inserted.
      */
-    def 'insert into, query from, count query, and delete from, all Tables and Views'() {
-        setup: 'get list of all Tables (plus optional debug print)'
-        boolean startedWithEmptyDatabase = false
-        def tables = getTables(page)
-        debugPrint "\n\nIn 'insert into, query from, count query, and delete from, all Tables and Views'..."
-        debugPrint "\nTables:\n  " + tables
-        
-        when: 'perform initial count queries on all Tables'
-        def cqResults = queryCount(page, tables)
-
-        then: 'all Tables should empty, for this test (otherwise, delete at end would be dangerous)'
-        cqResults.size() == tables.size()
-        cqResults.each { assert it ==  0}
-
-        when: 'insert data into all Tables'
-        startedWithEmptyDatabase = true  // true, if we made it this far
-        insertInto(page, tables, NUM_ROWS_TO_INSERT)
-
-        and: 'perform queries from all Tables'
-        queryFrom(page, tables, "Table")
-
-        and: 'perform queries from all Views'
-        def views = getViews(page)
-        queryFrom(page, views, "View")
-
-        and: 'perform count queries on all Tables'
-        cqResults = queryCount(page, tables)
-
-        then: 'all Tables should have the number of rows that were inserted above'
-        cqResults.size() == tables.size()
-        cqResults.each { assert it ==  NUM_ROWS_TO_INSERT}
-
-        when: 'perform count queries on all Views'
-        cqResults = queryCount(page, views)
-        debugPrint "\nViews:\n  " + views
-
-        then: 'all Views should have the number of rows that were inserted above'
-        cqResults.size() == views.size()
-        // Note: this might not always be true, but it works for 'genqa'
-        if (runningGenqa) {
-            cqResults.each { assert it ==  NUM_ROWS_TO_INSERT}
-        }
-
-        cleanup: 'delete all data added to all Tables (only if database was empty)'
-        if (startedWithEmptyDatabase) {
-            deleteFrom(page, tables)
-        }
+    def insertInto(SqlQueryPage sqp, List<String> tables, int numToInsert, int minIntValue) {
+        insertOrUpsertInto(sqp, tables, numToInsert, minIntValue, 'insert')
     }
 
     /**
-     * Optionally (if DEBUG is true), prints a list of items (found somewhere
-     * in the UI); and, also optionally (depending on the <i>compare</i>
-     * argument), compares that list to a list of expected items.
-     * 
-     * @param typesToCompare - the type of items being compared (e.g. 'Tables'
-     * or 'System Stored Procedures'), for print output purposes.
-     * @param fileName - the name (perhaps including the path) of the file
-     * containing the list of expected items, for an error message, if needed.
-     * @param expected - the list of values expected to be found.
-     * @param actual - the list of actual values found (in the UI).
-     * @param compare - whether or not you want to do the comparison part of
-     * the test (if false, the comparison is skipped).
-     * @return true if the test completed successfully; otherwise, throws an
-     * AssertionError.
+     * Runs, on the specified SqlQueryPage, and for each specified table (or
+     * view), the specified number of 'upsert into ...' queries. (Also, if
+     * debugPrint is true, prints everything that runQuery prints, namely: the
+     * query, the result, an error message, if any, and the query duration.)
+     * @param sqp - the SqlQueryPage on which to run the query.
+     * @param tables - the list of tables (or views) to be queried.
+     * @param numToInsert - the number of rows to be upserted.
+     * @param minIntValue - the minimum int value to be upserted.
      */
-    static <T> boolean printAndCompare(String typesToCompare, String fileName,
-                                       boolean compare, List<T> expected, List<T> actual) {
-        // Print out the list of (actual) items - if DEBUG is true
-        debugPrint '\n# ' + typesToCompare + ': (compare with ' + fileName + ')'
-        actual.each { debugPrint it }
+    def upsertInto(SqlQueryPage sqp, List<String> tables, int numToInsert, int minIntValue) {
+        insertOrUpsertInto(sqp, tables, numToInsert, minIntValue, 'upsert')
+    }
 
-        // Check that the expected and actual stored procedures match
-        if (expected == null || expected.isEmpty()) {
-            assert false, 'ERROR: No expected ' + typesToCompare + ' found! '
-                           + 'Need to specify some in ' + fileName
-        } else if (compare) {
-            assert expected == actual
+    /**
+     * Tests the query result format options (which normally are "HTML", "CSV"
+     * and "Monospace").
+     */
+    def queryResultFormat() {
+        when: 'get the query result format options (text)'
+        def options = page.getQueryResultFormatOptions()
+        debugPrint "\nQuery result format options (text): " + options
+
+        and: 'get the query result format options values'
+        def values = page.getQueryResultFormatOptionValues()
+        debugPrint "Query result format option values: " + values
+
+        and: 'get the initially selected query result format'
+        def format = page.getSelectedQueryResultFormat()
+        debugPrint "Initially selected query result format: " + format
+
+        then: 'the query result format options (text) should match the values'
+        options == values
+
+        and: 'the query result format options should match the expected list'
+        options == ['HTML', 'CSV', 'Monospace']
+
+        and: 'the HTML format option should be selected initially'
+        format == 'HTML'
+
+        options.each {
+            when: 'select one of the query result format to the options'
+            page.selectQueryResultFormat(it)
+            format = page.getSelectedQueryResultFormat()
+            debugPrint "Currently selected query result format: " + format
+
+            then: 'the query result format should be set to the selected option'
+            format == it
         }
-        return true
+
+        cleanup: 'reset the query result format to the default option'
+        page.selectQueryResultFormat('HTML')
+        format = page.getSelectedQueryResultFormat()
+        debugPrint "Final     selected query result format: " + format
+        assert format == 'HTML'
+    }
+
+    /**
+     * Runs insert into, upsert into, query from, count query, and delete from
+     * queries, for every Table listed on the SQL Query page of the VMC; and,
+     * when appropriate, for every View.
+     * <p>Note: this can run against any VoltDB database, since it gets the
+     * Table and View names from system properties, or from the UI.
+     */
+    def insertQueryCountAndDeleteForTablesAndViews() {
+        setup: 'get the list of Tables to test'
+        boolean startedWithEmptyTables = false
+        String testTables = System.getProperty('testTables', '')
+        def tables = []
+        if ('ALL'.equalsIgnoreCase(testTables)) {
+            tables = getTables(page)
+        } else if (testTables) {
+            tables = Arrays.asList(testTables.split(','))
+        }
+        debugPrint "\nTables to test:  " + tables
+
+        and: 'get the list of Views to test'
+        String testViews = System.getProperty('testViews', '')
+        def views = []
+        if ('ALL'.equalsIgnoreCase(testViews)) {
+            views = getViews(page)
+        } else if (testViews) {
+            views = Arrays.asList(testViews.split(','))
+        }
+        debugPrint "\nViews to test:  " + views
+
+        when: 'perform initial count queries on all Tables'
+        def cqResults = queryCount(page, tables)
+
+        then: 'number of count query results should match number of Tables'
+        cqResults.size() == tables.size()
+
+        when: 'check whether all Tables are empty (otherwise, delete at end would be dangerous)'
+        boolean allTablesEmpty = true
+        def minValuesForEachTable = [:]
+        cqResults.eachWithIndex { res, i ->
+            if (res > 0) {
+                allTablesEmpty = false
+                // TODO: improve this (to get max values, and insert/delete above them)
+                //def 
+                //minValuesForEachTable.put(tables[i], getFirstColumnAndMaxValue(tables[i]))
+            }
+        }
+        startedWithEmptyTables = allTablesEmpty
+
+        and: 'insert data into the test Tables'
+        def numRows = getIntSystemProperty('numRowsToInsert', DEFAULT_NUM_ROWS_TO_INSERT)
+        insertInto(page, tables, numRows, 100)
+
+        and: 'perform queries from the test Tables (after insert)'
+        queryFrom(page, tables, "Table")
+
+        and: 'perform queries from the test Views (after insert)'
+        queryFrom(page, views, "View")
+
+        and: 'perform count queries on the test Tables (after insert)'
+        cqResults = queryCount(page, tables)
+
+        then: 'the test Tables should have the number of rows that were inserted above'
+        cqResults.size() == tables.size()
+        cqResults.each { assert it ==  numRows}
+
+        when: 'perform count queries on the test Views (after insert)'
+        cqResults = queryCount(page, views)
+        debugPrint "\nViews:  " + views
+
+        then: 'the test Views should have the number of rows that were inserted above'
+        cqResults.size() == views.size()
+        // Note: this might not always be true, but it works for 'genqa'
+        if (isRunningGenqa(page)) {
+            cqResults.each { assert it ==  numRows}
+        }
+
+        when: 'upsert data into the test Tables'
+        startedWithEmptyTables = true  // true, if we made it this far
+        upsertInto(page, tables, numRows, 101)
+
+        and: 'perform queries from the test Tables (after upsert)'
+        queryFrom(page, tables, "Table")
+
+        and: 'perform queries from the test Views (after upsert)'
+        queryFrom(page, views, "View")
+
+        and: 'perform count queries on the test Tables (after upsert)'
+        cqResults = queryCount(page, tables)
+
+        then: 'the test Tables should have the number of rows that were inserted/upserted above'
+        cqResults.size() == tables.size()
+        cqResults.each { assert it == numRows + 1}
+
+        when: 'perform count queries on the test Views (after upsert)'
+        cqResults = queryCount(page, views)
+
+        then: 'the test Views should have the number of rows that were inserted/upserted above'
+        cqResults.size() == views.size()
+        // Note: this might not always be true, but it works for 'genqa'
+        if (isRunningGenqa(page)) {
+            cqResults.each { assert it == numRows + 1}
+        }
+
+        cleanup: 'delete all data added to the test Tables (only if they were all empty)'
+        if (startedWithEmptyTables) {
+            deleteFrom(page, tables)
+        }
     }
 
     /**
@@ -332,16 +611,16 @@ class SqlQueriesTest extends TestBase {
      */
     def checkTables() {
         expect: 'List of displayed Tables should match expected list'
-        printAndCompare('Tables', TABLES_FILE, runningGenqa, tableLines, getTables(page))
+        printAndCompare('Tables', tablesFileName, true, tableLines, getTables(page))
     }
-    
+
     /**
      * Check that the list of Views displayed on the page matches the expected
      * list (for the 'genqa' test app).
      */
     def checkViews() {
         expect: 'List of displayed Views should match expected list'
-        printAndCompare('Views', VIEWS_FILE, runningGenqa, viewLines, getViews(page))
+        printAndCompare('Views', viewsFileName, true, viewLines, getViews(page))
     }
 
     /**
@@ -351,7 +630,7 @@ class SqlQueriesTest extends TestBase {
     def checkSystemStoredProcs() {
         expect: 'List of displayed System Stored Procedures should match expected list'
         printAndCompare('System Stored Procedures', SYSTEM_STORED_PROCS_FILE, true,
-                        systemStoredProcLines, page.getSystemStoredProcedures())
+                systemStoredProcLines, page.getSystemStoredProcedures())
     }
 
     /**
@@ -360,8 +639,8 @@ class SqlQueriesTest extends TestBase {
      */
     def checkDefaultStoredProcs() {
         expect: 'List of displayed Default Stored Procedures should match expected list'
-        printAndCompare('Default Stored Procedures', DEFAULT_STORED_PROCS_FILE, runningGenqa,
-                        defaultStoredProcLines, page.getDefaultStoredProcedures())
+        printAndCompare('Default Stored Procedures', defaultStoredProcsFileName, true,
+                defaultStoredProcLines, page.getDefaultStoredProcedures())
     }
 
     /**
@@ -369,34 +648,29 @@ class SqlQueriesTest extends TestBase {
      * matches the expected list (for the 'genqa' test app).
      */
     def checkUserStoredProcs() {
-        expect: 'List of displayed User Stored Procedures should match expected list'
-        printAndCompare('User Stored Procedures', USER_STORED_PROCS_FILE, runningGenqa,
-                        userStoredProcLines, page.getUserStoredProcedures())
+        expect: 'List of displayed User-defined Stored Procedures should match expected list'
+        printAndCompare('User-defined Stored Procedures', userStoredProcsFileName, true,
+                userStoredProcLines, page.getUserStoredProcedures())
     }
 
     /**
-     *  Tests all the SQL queries specified in a text file. Note that these
-     *  queries only work if you are running against the 'genqa' test app;
-     *  otherwise, they will fail immediately.
+     * Tests all the SQL queries specified in the sqlQueries.txt file.
      */
-    @Unroll // performs this method for each 'testName' in the SQL Query text file
-    def '#testName'() {
-
-        if (!runningGenqa && expectedResponse.status == "SUCCESS") {
-            println ("\nWARNING: Apparently not running against the 'genqa' test "
-                    + "app, so this test (" + testName + ") will probably fail.")
-        }
+    @Unroll // performs this method for each test in the SQL Query text file
+    def '#sqlQueriesTestName'() {
 
         setup: 'execute the next query (or queries)'
-        page.runQuery(query)
+        runQuery(page, query)
 
         when: 'get the Query Result'
         def qResult = page.getQueryResult()
 
-        debugPrint "\ntestName      : " + testName
-        debugPrint "query         : " + query
+        debugPrint "\nquery         : " + query
         debugPrint "expect status : " + expectedResponse.status
         debugPrint "expect result : " + expectedResponse.result
+        if (expectedResponse.error != null) {
+            debugPrint "expect error  : " + expectedResponse.error
+        }
         debugPrint "\nactual results: " + page.getQueryResults()
         debugPrint "last result   : " + qResult
 
@@ -412,21 +686,269 @@ class SqlQueriesTest extends TestBase {
         debugPrint "actual status : " + status
         debugPrint "query duration: " + duration
         if (duration == null || duration.isEmpty()) {
-            println "WARNING: query duration '" + duration + "', for test '" + testName + "' is null or empty!"
+            println "\nWARNING: query duration '" + duration + "', for test '" +
+                    sqlQueriesTestName + "' is null or empty!"
         }
 
-        then: 'check the error status, and query result'
+        and: 'for a non-matching result, check if it is just a trim issue, and print details'
+        if (qResult instanceof Map && expectedResponse.result instanceof Map && qResult != expectedResponse.result) {
+            println "\nWARNING: query result does not match expected, for column(s):"
+            boolean allDiffsCausedByTrim = true
+            def expCols = expectedResponse.result.keySet()
+            def actCols = qResult.keySet()
+            for (String col: expCols) {
+                def expCol = expectedResponse.result.get(col)
+                def actCol = qResult.get(col)
+                if (!expCol.equals(actCol)) {
+                    println "  expected " + col + ": '" + expCol + "'"
+                    println "  actual   " + col + ": '" + actCol + "'"
+                    for (int i=0; i < expCol.size(); i++) {
+                        if (actCol != null && expCol[i].trim().equals(actCol[i])) {
+                            expCol[i] = actCol[i]
+                        } else {
+                            allDiffsCausedByTrim = false
+                        }
+                    }
+                }
+            }
+            // Check for any columns that occur in the actual, but not expected, results
+            for (String col: actCols) {
+                def expCol = expectedResponse.result.get(col)
+                if (expCol == null) {
+                    println "  expected " + col + ": '" + expCol + "'"
+                    println "  actual   " + col + ": '" + qResult.get(col) + "'"
+                    allDiffsCausedByTrim = false
+                }
+            }
+            if (allDiffsCausedByTrim) {
+                println "All these differences appear to be caused by Selenium calling trim() on the " +
+                        "column values, so this test (" + sqlQueriesTestName + ") will likely pass."
+            } else {
+                println "There are real differences here, so this test (" + sqlQueriesTestName + ") will fail."
+            }
+        }
+
+        then: 'check the query result, error status, and error message (if any)'
         expectedResponse.result == qResult
         expectedResponse.status == status
-        
+        expectedResponse.error == null || (error != null && error.contains(expectedResponse.error))
+
         cleanup: 'delete all rows from the tables'
-        page.runQuery('delete from partitioned_table;\ndelete from replicated_table')
+        runQuery(page, 'delete from partitioned_table;\ndelete from replicated_table')
 
         where: 'list of queries to test and expected responses'
         line << sqlQueryLines
         iter = slurper.parseText(line)
-        testName = iter.testName
+        sqlQueriesTestName = iter.testName
         query = iter.sqlCmd
         expectedResponse = iter.response
+    }
+
+    //sql queries test for admin-client port
+
+
+    def "Check sqlquery client to admin port switching for cancel popup"() {
+
+        when: 'click the SQL Query link (if needed)'
+        openSqlQueryPage()
+        then: 'should be on SQL Query page'
+        at SqlQueryPage
+
+        String checkQuery = page.getQueryToCreateTable()
+
+        when: 'set create query in the box'
+        page.setQueryText(checkQuery)
+        then: 'run the query'
+        page.runQuery()
+
+        try {
+            waitFor(10) {
+                page.cancelpopupquery.isDisplayed()
+                page.cancelpopupquery.click()
+                page.queryDurHtml.isDisplayed()
+                println("result shown without popup, hence it is in admin port")
+                println("cancel button clicked")
+
+            }
+
+
+
+        } catch (geb.error.RequiredPageContentNotPresent e) {
+            println("pop up won't occurr due to already in running state")
+            println("it is already in admin port")
+
+        } catch (geb.waiting.WaitTimeoutException e) {
+
+
+            println("already in admin port state")
+
+        }
+
+        when: 'click the Admin link (if needed)'
+        page.openAdminPage()
+        then: 'should be on Admin page'
+        at AdminPage
+
+        try {
+            waitFor(10) {
+                page.networkInterfaces.clusterClientPortValue.isDisplayed()
+                cluster.pausebutton.isDisplayed()
+            }
+            cluster.pausebutton.click()
+            waitFor(10) { cluster.pauseok.isDisplayed() }
+            cluster.pauseok.click()
+            println("Pause button displayed and clicked!!")
+
+        } catch (geb.error.RequiredPageContentNotPresent e) {
+            println("Already in pause state!! in admin page.")
+
+        } catch (geb.waiting.WaitTimeoutException e) {
+
+            page.networkInterfaces.clusterClientPortValue.isDisplayed()
+            println("rechecking due to geb waiting exception")
+
+        }
+
+        when: 'click the SQL Query link (if needed)'
+        openSqlQueryPage()
+        then: 'should be on SQL Query page'
+        at SqlQueryPage
+
+        String createQuery = page.getQueryToCreateTable()
+        String deleteQuery = page.getQueryToDeleteTable()
+        String tablename = page.getTablename()
+
+        when: 'set create query in the box'
+        page.setQueryText(createQuery)
+        then: 'run the query'
+        page.runQuery()
+        try {
+            waitFor(15) {
+                page.cancelpopupquery.isDisplayed()
+                page.okpopupquery.isDisplayed()
+                page.switchadminport.isDisplayed()
+                page.queryexecutionerror.isDisplayed()
+                page.queryerrortxt.isDisplayed()
+            }
+
+            page.cancelpopupquery.click()
+            println("all popup query verified for creating table!!")
+        }catch(geb.waiting.WaitTimeoutException e) {println("waiting time exceed here")}
+
+        when: 'set select query in the box'
+        page.setQueryText("SELECT * FROM " + tablename)
+        then: 'run the query'
+        page.runQuery()
+        try {
+            waitFor(5) {
+                page.cancelpopupquery.isDisplayed()
+                page.okpopupquery.isDisplayed()
+                page.switchadminport.isDisplayed()
+                page.queryexecutionerror.isDisplayed()
+                page.queryerrortxt.isDisplayed()
+            }
+            page.cancelpopupquery.click()
+            println("all popup query verified for selecting data from table!!")
+
+            when: 'set delete query in the box'
+            page.setQueryText(deleteQuery)
+            then: 'run the query'
+            page.runQuery()
+            waitFor(5) {
+                page.cancelpopupquery.isDisplayed()
+                page.okpopupquery.isDisplayed()
+                page.switchadminport.isDisplayed()
+                page.queryexecutionerror.isDisplayed()
+                page.queryerrortxt.isDisplayed()
+            }
+            page.cancelpopupquery.click()
+            println("all popup for query verified for deleting data from table!!")
+        }catch(geb.error.RequiredPageContentNotPresent e) {println("element not found")}
+
+        catch(geb.waiting.WaitTimeoutException e) {println("waiting time exceed here")}
+    }
+
+
+
+    def "Check sqlquery client to admin port switching for ok poup"() {
+        when: 'click the Admin link (if needed)'
+        page.openAdminPage()
+        then: 'should be on Admin page'
+        at AdminPage
+
+        try {
+            waitFor(10) {
+
+                page.networkInterfaces.clusterClientPortValue.isDisplayed()
+                cluster.pausebutton.click()
+                cluster.pauseok.click()
+                println("Pause button displayed and clicked!!")}
+
+        } catch (geb.error.RequiredPageContentNotPresent e) {
+            println("Already in resume state!!")
+
+        } catch (geb.waiting.WaitTimeoutException e) {
+
+            page.networkInterfaces.clusterClientPortValue.isDisplayed()
+            println("rechecking due to geb waiting exception")
+
+        }
+
+        when: 'click the SQL Query link (if needed)'
+        openSqlQueryPage()
+        then: 'should be on SQL Query page'
+        at SqlQueryPage
+
+        String createQuery = page.getQueryToCreateTable()
+        String deleteQuery = page.getQueryToDeleteTable()
+        String tablename = page.getTablename()
+
+        when: 'set create query in the box'
+        page.setQueryText(createQuery)
+        then: 'run the query'
+        page.runQuery()
+
+        try {
+            waitFor(10) {
+
+
+                page.cancelpopupquery.isDisplayed()
+                page.okpopupquery.isDisplayed()
+                page.switchadminport.isDisplayed()
+                page.queryexecutionerror.isDisplayed()
+                page.queryerrortxt.isDisplayed()
+            }
+
+            page.okpopupquery.click()
+            println("all popup query verified for creating table!!")
+        } catch(geb.waiting.WaitTimeoutException e) {println("waiting time exceed")}
+
+        try {
+            if(waitFor(5){page.htmlresultallcolumns.isDisplayed()}){
+                println("all columns displayed for creating table as: " +page.htmlresultallcolumns.text())}
+            if(waitFor(5){page.htmltableresult.isDisplayed()}){
+                println("table result shown for creating table HTML format i.e, "+page.htmltableresult.text())
+            }
+
+        }catch (geb.waiting.WaitTimeoutException e) {println("couldn't check due to server not online error or waiting time error")}
+
+
+        when: 'set select query in the box'
+        page.setQueryText("SELECT * FROM " + tablename)
+        then: 'run the query'
+        page.runQuery()
+
+        try {
+            if(waitFor(5){page.htmlresultselect.isDisplayed()}){
+                println("all columns displayed for selecting table as: " +page.htmlresultselect.text())}
+
+        }catch (geb.waiting.WaitTimeoutException e) {println("couldn't check due to server not online error or waiting time error")}
+
+
+        when: 'set delete query in the box'
+        page.setQueryText(deleteQuery)
+        then: 'run the query'
+        page.runQuery()
+
     }
 }

@@ -335,7 +335,6 @@ public class MockVoltClient implements Client, ReplicaProcCaller{
     @Override
     public void writeSummaryCSV(ClientStats stats, String path) throws IOException {
         // TODO Auto-generated method stub
-
     }
 
     @Override
@@ -350,6 +349,12 @@ public class MockVoltClient implements Client, ReplicaProcCaller{
     }
 
     @Override
+    public VoltBulkLoader getNewBulkLoader(String tableName, int maxBatchSize,
+            boolean upsert, BulkLoaderFailureCallBack blfcb) throws Exception {
+        return null;
+    }
+
+    @Override
     public ClientResponse updateClasses(File jarPath, String classesToDelete)
             throws IOException, NoConnectionsException, ProcCallException {
         // TODO Auto-generated method stub
@@ -359,6 +364,22 @@ public class MockVoltClient implements Client, ReplicaProcCaller{
     @Override
     public boolean updateClasses(ProcedureCallback callback, File jarPath,
             String classesToDelete) throws IOException, NoConnectionsException {
+        // TODO Auto-generated method stub
+        return false;
+    }
+
+
+    @Override
+    public ClientResponse callProcedureWithTimeout(int batchTimeout, String procName, Object... parameters)
+        throws IOException, NoConnectionsException, ProcCallException {
+        // TODO Auto-generated method stub
+        return null;
+    }
+
+    @Override
+    public boolean callProcedureWithTimeout(ProcedureCallback callback,
+            int batchTimeout, String procName, Object... parameters)
+            throws IOException, NoConnectionsException {
         // TODO Auto-generated method stub
         return false;
     }

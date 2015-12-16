@@ -60,6 +60,9 @@ SELECT COUNT(*) FROM @fromtables B10
 -- test where expressions
 --- test comparison operators (<, <=, =, >=, >)
 SELECT * FROM @fromtables A WHERE _maybe _variable[#arg @comparabletype] _cmp @comparableconstant
+--- test EXISTS/IN operators ()
+SELECT * FROM @fromtables A WHERE EXISTS(SELECT * FROM @fromtables B WHERE _maybe B.@idcol _cmp A.@idcol )
+
 --- test arithmetic operators (+, -, *, /) with comparison ops
 SELECT * FROM @fromtables A WHERE (_variable[#arg @comparabletype] @aftermath) _cmp @comparableconstant
 --- test logic operators (AND) with comparison ops
@@ -89,3 +92,14 @@ SELECT * FROM @fromtables LHS INNER JOIN @fromtables B19RHS ON LHS.@idcol = B19R
 -- TODO: If the intent is to support a schema with multiple id-partitioned tables,
 -- this statement is looking for trouble -- might want to migrate it to its own template/suite.
 SELECT * FROM @fromtables LHS INNER JOIN @fromtables B20RHS ON LHS._variable[@columntype] = B20RHS._variable[@comparabletype]
+
+
+--- test IN/EXISTS predicate
+--- Use @columntype instead of @comparabletype because Hsql sometimes return wrong answers between integer and decimal comparison for IN.
+SELECT * FROM @fromtables A WHERE EXISTS ( SELECT * FROM @fromtables B WHERE B._variable[@columntype] _cmp A._variable[@columntype] )
+SELECT * FROM @fromtables A WHERE _variable[@columntype] IN ( SELECT _variable[@columntype] FROM @fromtables B )
+SELECT * FROM @fromtables A WHERE _variable[@comparabletype] _cmp @comparableconstant AND EXISTS ( SELECT * FROM @fromtables B WHERE B._variable[@columntype] _cmp A._variable[@columntype] )
+
+--- test scalar subqueries (ENG-7959)
+SELECT *, (SELECT COUNT(*) FROM @fromtables WHERE _variable[@comparabletype] _cmp B24._variable[@comparabletype]) FROM @fromtables AS B24
+SELECT * FROM @fromtables AS B25 WHERE _variable[numeric] _cmp (SELECT COUNT(*) FROM @fromtables)

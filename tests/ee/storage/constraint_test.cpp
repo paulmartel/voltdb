@@ -80,7 +80,7 @@ public:
         m_engine.setBuffers( NULL, 0, NULL, 0, m_exceptionBuffer, 4096);
         m_engine.resetReusedResultOutputBuffer();
         int partitionCount = 1;
-        m_engine.initialize(0, 0, 0, 0, "", DEFAULT_TEMP_TABLE_MEMORY);
+        m_engine.initialize(0, 0, 0, 0, "", 0, DEFAULT_TEMP_TABLE_MEMORY, false);
         m_engine.updateHashinator( HASHINATOR_LEGACY, (char*)&partitionCount, NULL, 0);
     }
     ~ConstraintTest() {
@@ -92,7 +92,6 @@ protected:
     voltdb::Table* table;
     voltdb::CatalogId database_id;
     voltdb::VoltDBEngine m_engine;
-    voltdb::MockDRTupleStream drStream;
     char signature[20];
 
     char *m_exceptionBuffer;
@@ -117,7 +116,7 @@ protected:
         if (pkey != NULL) {
             pkey->tupleSchema = schema;
         }
-        table = TableFactory::getPersistentTable(this->database_id, "test_table", schema, columnNames, signature, &drStream, false);
+        table = TableFactory::getPersistentTable(this->database_id, "test_table", schema, columnNames, signature);
         if (pkey) {
             TableIndex *pkeyIndex = TableIndexFactory::TableIndexFactory::getInstance(*pkey);
             assert(pkeyIndex);

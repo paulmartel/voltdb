@@ -22,24 +22,53 @@
 #include <cassert>
 #include <cstring>
 #include <stdint.h>
+#include <limits>
 
 #define MAGIC_HEADER_SPACE_FOR_JAVA 8
 namespace voltdb
 {
+    enum StreamBlockType {
+        NORMAL_STREAM_BLOCK = 1,
+        LARGE_STREAM_BLOCK = 2
+    };
     /**
      * A single data block with some buffer semantics.
      */
     class StreamBlock {
     public:
-        StreamBlock(char* data, size_t capacity, size_t uso)
-            : m_data(data + MAGIC_HEADER_SPACE_FOR_JAVA), m_capacity(capacity - MAGIC_HEADER_SPACE_FOR_JAVA), m_offset(0),
-              m_uso(uso)
+        StreamBlock(char* data, size_t headerSize, size_t capacity, size_t uso)
+            : m_data(data + headerSize), m_capacity(capacity - headerSize),
+              m_headerSize(headerSize), m_offset(0),
+              m_uso(uso),
+              m_startSpHandle(std::numeric_limits<int64_t>::max()),
+              m_lastSpHandle(std::numeric_limits<int64_t>::max()),
+              m_lastCommittedSpHandle(std::numeric_limits<int64_t>::max()),
+              m_lastDRBeginTxnOffset(0),
+              m_hasDRBeginTxn(false),
+              m_rowCountForDR(0),
+              m_startDRSequenceNumber(std::numeric_limits<int64_t>::max()),
+              m_lastDRSequenceNumber(std::numeric_limits<int64_t>::max()),
+              m_lastSpUniqueId(0),
+              m_lastMpUniqueId(0),
+              m_type(voltdb::NORMAL_STREAM_BLOCK)
         {
         }
 
         StreamBlock(StreamBlock *other)
-            : m_data(other->m_data), m_capacity(other->m_capacity), m_offset(other->m_offset),
-              m_uso(other->m_uso)
+            : m_data(other->m_data), m_capacity(other->m_capacity),
+              m_headerSize(other->m_headerSize), m_offset(other->m_offset),
+              m_uso(other->m_uso),
+              m_startSpHandle(std::numeric_limits<int64_t>::max()),
+              m_lastSpHandle(std::numeric_limits<int64_t>::max()),
+              m_lastCommittedSpHandle(std::numeric_limits<int64_t>::max()),
+              m_lastDRBeginTxnOffset(other->m_lastDRBeginTxnOffset),
+              m_hasDRBeginTxn(other->m_hasDRBeginTxn),
+              m_rowCountForDR(other->m_rowCountForDR),
+              m_startDRSequenceNumber(other->m_startDRSequenceNumber),
+              m_lastDRSequenceNumber(other->m_lastDRSequenceNumber),
+              m_lastSpUniqueId(other->m_lastSpUniqueId),
+              m_lastMpUniqueId(other->m_lastMpUniqueId),
+              m_type(other->m_type)
         {
         }
 
@@ -51,11 +80,11 @@ namespace voltdb
          * Returns a pointer to the underlying raw memory allocation
          */
         char* rawPtr() {
-            return m_data - MAGIC_HEADER_SPACE_FOR_JAVA;
+            return m_data - m_headerSize;
         }
 
         int32_t rawLength() const {
-            return  static_cast<int32_t>(m_offset) + MAGIC_HEADER_SPACE_FOR_JAVA;
+            return static_cast<int32_t>(m_offset + m_headerSize);
         }
 
         /**
@@ -83,14 +112,70 @@ namespace voltdb
             return m_capacity - m_offset;
         }
 
+        size_t headerSize() const {
+            return m_headerSize;
+        }
+
+        /**
+         * Number of maximum bytes stored in the buffer
+         */
+        size_t capacity() const {
+            return m_capacity;
+        }
+
+        size_t lastDRBeginTxnOffset() const {
+            return m_lastDRBeginTxnOffset;
+        }
+
+        int64_t startDRSequenceNumber() const {
+            return m_startDRSequenceNumber;
+        }
+
+        void startDRSequenceNumber(int64_t startDRSequenceNumber) {
+            m_startDRSequenceNumber = std::min(startDRSequenceNumber, m_startDRSequenceNumber);
+        }
+
+        int64_t lastDRSequenceNumber() const {
+            return m_lastDRSequenceNumber;
+        }
+
+        int64_t lastSpUniqueId() const {
+            return m_lastSpUniqueId;
+        }
+
+        int64_t lastMpUniqueId() const {
+            return m_lastMpUniqueId;
+        }
+
+        void recordCompletedSequenceNumForDR(int64_t lastDRSequenceNumber) {
+            m_lastDRSequenceNumber = lastDRSequenceNumber;
+        }
+
+        void recordCompletedSpTxnForDR(int64_t lastSpUniqueId) {
+            m_lastSpUniqueId = lastSpUniqueId;
+        }
+
+        void recordCompletedMpTxnForDR(int64_t lastMpUniqueId) {
+            m_lastMpUniqueId = lastMpUniqueId;
+        }
+
+        size_t updateRowCountForDR(size_t rowsToCommit) {
+            m_rowCountForDR += rowsToCommit;
+            return m_rowCountForDR;
+        }
+
+        StreamBlockType type() const {
+            return m_type;
+        }
+
     private:
         char* mutableDataPtr() {
             return m_data + m_offset;
         }
 
         void consumed(size_t consumed) {
+            assert ((m_offset + consumed) <= m_capacity);
             m_offset += consumed;
-            assert (m_offset < m_capacity);
         }
 
         void truncateTo(size_t mark) {
@@ -103,12 +188,46 @@ namespace voltdb
                                     "\n m_uso(%jd), m_offset(%jd), mark(%jd)\n",
                                     (intmax_t)m_uso, (intmax_t)m_offset, (intmax_t)mark);
             }
+
+            recordLastBeginTxnOffset();
         }
+
+        void recordLastBeginTxnOffset() {
+            m_lastDRBeginTxnOffset = m_offset;
+            m_hasDRBeginTxn = true;
+        }
+
+        void clearLastBeginTxnOffset() {
+            m_lastDRBeginTxnOffset = 0;
+            m_hasDRBeginTxn =false;
+        }
+
+        bool hasDRBeginTxn() {
+            return m_hasDRBeginTxn;
+        }
+
+        char* mutableLastBeginTxnDataPtr() {
+            return m_data + m_lastDRBeginTxnOffset;
+        }
+
+        void setType(StreamBlockType type) { m_type = type; }
 
         char *m_data;
         const size_t m_capacity;
+        const size_t m_headerSize;
         size_t m_offset;         // position for next write.
         size_t m_uso;            // universal stream offset of m_offset 0.
+        int64_t m_startSpHandle;
+        int64_t m_lastSpHandle;
+        int64_t m_lastCommittedSpHandle;
+        size_t m_lastDRBeginTxnOffset;  // keep record of DR begin txn to avoid txn span multiple buffers
+        bool m_hasDRBeginTxn;    // only used for DR Buffer
+        size_t m_rowCountForDR;
+        int64_t m_startDRSequenceNumber;
+        int64_t m_lastDRSequenceNumber;
+        int64_t m_lastSpUniqueId;
+        int64_t m_lastMpUniqueId;
+        StreamBlockType m_type;
 
         friend class TupleStreamBase;
         friend class ExportTupleStream;

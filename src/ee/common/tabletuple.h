@@ -56,6 +56,8 @@
 #include <cassert>
 #include <ostream>
 #include <iostream>
+#include <vector>
+#include <jsoncpp/jsoncpp.h>
 
 class CopyOnWriteTest_TestTableTupleFlags;
 
@@ -72,6 +74,7 @@ class TableColumn;
 class TupleIterator;
 class ElasticScanner;
 class StandAloneTupleStorage;
+class SetAndRestorePendingDeleteFlag;
 
 class TableTuple {
     // friend access is intended to allow write access to the tuple flags -- try not to abuse it...
@@ -84,6 +87,7 @@ class TableTuple {
     friend class CopyOnWriteContext;
     friend class ::CopyOnWriteTest_TestTableTupleFlags;
     friend class StandAloneTupleStorage; // ... OK, this friend can also update m_schema.
+    friend class SetAndRestorePendingDeleteFlag;
 
 public:
     /** Initialize a tuple unassociated with a table (bad idea... dangerous) */
@@ -146,49 +150,37 @@ public:
         size_t bytes = 0;
         int cols = sizeInValues();
         for (int i = 0; i < cols; ++i) {
-            const TupleSchema::ColumnInfo *columnInfo = m_schema->getColumnInfo(i);
-            voltdb::ValueType columnType = columnInfo->getVoltType();
-            switch (columnType) {
-              case VALUE_TYPE_TINYINT:
-                  bytes += sizeof (int8_t);
-                  break;
+            bytes += maxExportSerializedColumnSize(i);
+        }
+        return bytes;
+    }
 
-              case VALUE_TYPE_SMALLINT:
-                  bytes += sizeof (int16_t);
-                  break;
+    size_t maxDRSerializationSize(const std::vector<int>* interestingColumns) const {
+        size_t bytes = 0;
 
-              case VALUE_TYPE_INTEGER:
-                  bytes += sizeof (int32_t);
-                  break;
-
-              case VALUE_TYPE_BIGINT:
-              case VALUE_TYPE_TIMESTAMP:
-              case VALUE_TYPE_DOUBLE:
-                bytes += sizeof (int64_t);
-                break;
-
-              case VALUE_TYPE_DECIMAL:
-                //1-byte scale, 1-byte precision, 16 bytes all the time right now
-                bytes += 18;
-                break;
-
-              case VALUE_TYPE_VARCHAR:
-              case VALUE_TYPE_VARBINARY:
-                  // 32 bit length preceding value and
-                  // actual character data without null string terminator.
-                  if (!getNValue(i).isNull())
-                  {
-                      bytes += (sizeof (int32_t) +
-                                ValuePeeker::peekObjectLength_withoutNull(getNValue(i)));
-                  }
-                break;
-              default:
-                // let caller handle this error
-                throwDynamicSQLException(
-                        "Unknown ValueType %s found during Export serialization.",
-                        valueToString(columnType).c_str() );
-                return (size_t)0;
+        if (!interestingColumns) {
+            bytes = maxExportSerializationSize();
+        } else {
+            std::vector<int> cols = *interestingColumns;
+            for (std::vector<int>::const_iterator cit = cols.begin(); cit != cols.end(); ++cit) {
+                bytes += maxExportSerializedColumnSize(*cit);
             }
+        }
+
+        int hiddenCols = m_schema->hiddenColumnCount();
+        for (int i = 0; i < hiddenCols; ++i) {
+            bytes += maxExportSerializedHiddenColumnSize(i);
+        }
+
+        return bytes;
+    }
+
+    // return the number of bytes when serialized for regular usage (other
+    // than export and DR).
+    size_t serializationSize() const {
+        size_t bytes = sizeof(int32_t);
+        for (int colIdx = 0; colIdx < sizeInValues(); ++colIdx) {
+            bytes += maxSerializedColumnSize(colIdx);
         }
         return bytes;
     }
@@ -196,26 +188,20 @@ public:
     // Return the amount of memory allocated for non-inlined objects
     size_t getNonInlinedMemorySize() const
     {
+        // fast-path for no inlined cols
+        if (m_schema->getUninlinedObjectColumnCount() == 0) {
+            return 0;
+        }
+        // TODO: simplify this loop using the non-inlined-only column iteration
+        // technique used in copyForPersistentInsert's for loop.
         size_t bytes = 0;
         int cols = sizeInValues();
-        // fast-path for no inlined cols
-        if (m_schema->getUninlinedObjectColumnCount() != 0)
-        {
-            for (int i = 0; i < cols; ++i)
-            {
-                // peekObjectLength is unhappy with non-varchar
-                const TupleSchema::ColumnInfo *columnInfo = m_schema->getColumnInfo(i);
-                voltdb::ValueType columnType = columnInfo->getVoltType();
-                if (((columnType == VALUE_TYPE_VARCHAR) || (columnType == VALUE_TYPE_VARBINARY)) &&
-                    !columnInfo->inlined)
-                {
-                    const NValue val = getNValue(i);
-                    if (!val.isNull())
-                    {
-                        bytes += StringRef::computeStringMemoryUsed(
-                                (ValuePeeker::peekObjectLength_withoutNull(val)));
-                    }
-                }
+        for (int i = 0; i < cols; ++i) {
+            const TupleSchema::ColumnInfo *columnInfo = m_schema->getColumnInfo(i);
+            voltdb::ValueType columnType = columnInfo->getVoltType();
+            if (((columnType == VALUE_TYPE_VARCHAR) || (columnType == VALUE_TYPE_VARBINARY)) &&
+                !columnInfo->inlined) {
+                bytes += getNValue(i).getAllocationSizeForObject();
             }
         }
         return bytes;
@@ -231,6 +217,13 @@ public:
      * a persistent table!
      */
     void setNValue(const int idx, voltdb::NValue value) const;
+
+    /*
+     * Like the above method except for "hidden" fields, not
+     * accessible in the normal codepath.
+     */
+    void setHiddenNValue(const int idx, voltdb::NValue value) const;
+
     /*
      * Copies range of NValues from one tuple to another.
      */
@@ -275,6 +268,11 @@ public:
         return getNValue(idx).isNull();
     }
 
+    /** Is the hidden column value null? */
+    inline bool isHiddenNull(const int idx) const {
+        return getHiddenNValue(idx).isNull();
+    }
+
     inline bool isNullTuple() const {
         return m_data == NULL;
     }
@@ -295,6 +293,20 @@ public:
         return NValue::initFromTupleStorage(dataPtr, columnType, isInlined);
     }
 
+    /** Like the above method but for hidden columns. */
+    inline const NValue getHiddenNValue(const int idx) const {
+        assert(m_schema);
+        assert(m_data);
+        assert(idx < m_schema->hiddenColumnCount());
+
+        const TupleSchema::ColumnInfo *columnInfo = m_schema->getHiddenColumnInfo(idx);
+        const voltdb::ValueType columnType = columnInfo->getVoltType();
+        const char* dataPtr = getDataPtr(columnInfo);
+        const bool isInlined = columnInfo->inlined;
+
+        return NValue::initFromTupleStorage(dataPtr, columnType, isInlined);
+    }
+
     inline const voltdb::TupleSchema* getSchema() const {
         return m_schema;
     }
@@ -306,6 +318,20 @@ public:
     /** Print out a human readable description of this tuple */
     std::string debug(const std::string& tableName) const;
     std::string debugNoHeader() const;
+
+    std::string toJsonArray() const {
+        int totalColumns = sizeInValues();
+        Json::Value array(Json::arrayValue);
+
+        array.resize(totalColumns);
+        for (int i = 0; i < totalColumns; i++) {
+            array[i] = getNValue(i).toString();
+        }
+
+        std::string retval = Json::FastWriter().write(array);
+        // The FastWritter always writes a newline at the end, ignore it
+        return std::string(retval, 0, retval.length() - 1);
+    }
 
     /** Copy values from one tuple into another (uses memcpy) */
     void copyForPersistentInsert(const TableTuple &source, Pool *pool = NULL);
@@ -319,15 +345,18 @@ public:
     void setAllNulls() const;
 
     bool equals(const TableTuple &other) const;
-    bool equalsNoSchemaCheck(const TableTuple &other) const;
+    bool equalsNoSchemaCheck(const TableTuple &other, bool includeHiddenColumns = false) const;
 
     int compare(const TableTuple &other) const;
 
     void deserializeFrom(voltdb::SerializeInputBE &tupleIn, Pool *stringPool);
     void deserializeFromDR(voltdb::SerializeInputLE &tupleIn, Pool *stringPool);
-    void serializeTo(voltdb::SerializeOutput &output);
+    void serializeTo(voltdb::SerializeOutput &output, bool includeHiddenColumns = false);
     void serializeToExport(voltdb::ExportSerializeOutput &io,
                           int colOffset, uint8_t *nullArray);
+    void serializeToDR(voltdb::ExportSerializeOutput &io,
+                       int colOffset, uint8_t *nullArray,
+                       const std::vector<int>* interestingColumns);
 
     void freeObjectColumns();
     size_t hashCode(size_t seed) const;
@@ -390,6 +419,102 @@ private:
         assert(m_schema);
         assert(m_data);
         return &m_data[TUPLE_HEADER_SIZE + colInfo->offset];
+    }
+
+    inline void serializeColumnToExport(ExportSerializeOutput &io, int colOffset, int colIndex, uint8_t *nullArray) const {
+        // NULL doesn't produce any bytes for the NValue
+        // Handle it here to consolidate manipulation of
+        // the null array.
+        if (isNull(colIndex)) {
+            // turn on colIndex'th bit of nullArray
+            int byte = (colOffset + colIndex) >> 3;
+            int bit = (colOffset + colIndex) % 8;
+            int mask = 0x80 >> bit;
+            nullArray[byte] = (uint8_t)(nullArray[byte] | mask);
+        } else {
+            getNValue(colIndex).serializeToExport_withoutNull(io);
+        }
+    }
+
+    inline void serializeHiddenColumnsToDR(ExportSerializeOutput &io) const {
+        for (int colIdx = 0; colIdx < m_schema->hiddenColumnCount(); colIdx++) {
+            getHiddenNValue(colIdx).serializeToExport_withoutNull(io);
+        }
+    }
+
+    inline size_t maxExportSerializedColumnSize(int colIndex) const {
+        return maxExportSerializedColumnSizeCommon(colIndex, false);
+    }
+
+    inline size_t maxExportSerializedHiddenColumnSize(int colIndex) const {
+        return maxExportSerializedColumnSizeCommon(colIndex, true);
+    }
+
+    inline size_t maxExportSerializedColumnSizeCommon(int colIndex, bool isHidden) const {
+        const TupleSchema::ColumnInfo *columnInfo;
+        if (isHidden) {
+            columnInfo = m_schema->getHiddenColumnInfo(colIndex);
+        } else {
+            columnInfo = m_schema->getColumnInfo(colIndex);
+        }
+        voltdb::ValueType columnType = columnInfo->getVoltType();
+        switch (columnType) {
+          case VALUE_TYPE_TINYINT:
+              return sizeof (int8_t);
+          case VALUE_TYPE_SMALLINT:
+              return sizeof (int16_t);
+          case VALUE_TYPE_INTEGER:
+              return sizeof (int32_t);
+          case VALUE_TYPE_BIGINT:
+          case VALUE_TYPE_TIMESTAMP:
+          case VALUE_TYPE_DOUBLE:
+              return sizeof (int64_t);
+          case VALUE_TYPE_DECIMAL:
+              //1-byte scale, 1-byte precision, 16 bytes all the time right now
+              return 18;
+          case VALUE_TYPE_VARCHAR:
+          case VALUE_TYPE_VARBINARY:
+              bool isNullCol;
+              if (isHidden) {
+                  isNullCol = isHiddenNull(colIndex);
+              } else {
+                  isNullCol = isNull(colIndex);
+              }
+
+              // 32 bit length preceding value and
+              // actual character data without null string terminator.
+              if (!isNullCol)
+              {
+                  const NValue value = isHidden ? getHiddenNValue(colIndex) : getNValue(colIndex);
+                  return (sizeof (int32_t) + ValuePeeker::peekObjectLength_withoutNull(value));
+              }
+              return (size_t)0;
+          default:
+            // let caller handle this error
+            throwDynamicSQLException(
+                    "Unknown ValueType %s found during Export serialization.",
+                    valueToString(columnType).c_str() );
+            return (size_t)0;
+        }
+    }
+
+    inline size_t maxSerializedColumnSize(int colIndex) const {
+        const TupleSchema::ColumnInfo *columnInfo = m_schema->getColumnInfo(colIndex);
+        voltdb::ValueType columnType = columnInfo->getVoltType();
+
+        if (columnType == VALUE_TYPE_VARCHAR || columnType == VALUE_TYPE_VARBINARY) {
+            // Null variable length value doesn't take any bytes in
+            // export table, so here needs a special handle for VARCHAR
+            // and VARBINARY
+            if (isNull(colIndex)) {
+                return sizeof(int32_t);
+            }
+        } else if (columnType == VALUE_TYPE_DECIMAL) {
+            // Other than export and DR table, decimal column in regular table
+            // doesn't contain scale and precision bytes.
+            return 16;
+        }
+        return maxExportSerializedColumnSize(colIndex);
     }
 };
 
@@ -531,6 +656,20 @@ inline void TableTuple::setNValue(const int idx, voltdb::NValue value) const
     value.serializeToTupleStorage(dataPtr, isInlined, columnLength, isInBytes);
 }
 
+inline void TableTuple::setHiddenNValue(const int idx, voltdb::NValue value) const
+{
+    assert(m_schema);
+    assert(m_data);
+
+    const TupleSchema::ColumnInfo *columnInfo = m_schema->getHiddenColumnInfo(idx);
+    value = value.castAs(columnInfo->getVoltType());
+    const bool isInlined = columnInfo->inlined;
+    const bool isInBytes = columnInfo->inBytes;
+    char *dataPtr = getWritableDataPtr(columnInfo);
+    const int32_t columnLength = columnInfo->length;
+    value.serializeToTupleStorage(dataPtr, isInlined, columnLength, isInBytes);
+}
+
 /** Multi column version. */
 inline void TableTuple::setNValues(int beginIdx, TableTuple lhs, int begin, int end) const
 {
@@ -573,7 +712,7 @@ inline void TableTuple::copyForPersistentInsert(const voltdb::TableTuple &source
     const uint16_t uninlineableObjectColumnCount = m_schema->getUninlinedObjectColumnCount();
 
 #ifndef NDEBUG
-    if( ! m_schema->isCompatibleForCopy(source.m_schema)) {
+    if( ! m_schema->isCompatibleForMemcpy(source.m_schema)) {
         std::ostringstream message;
         message << "src  tuple: " << source.debug("") << std::endl;
         message << "src schema: " << source.m_schema->debug() << std::endl;
@@ -663,6 +802,17 @@ inline void TableTuple::copyForPersistentUpdate(const TableTuple &source,
                 setNValueAllocateForObjectCopies(ii, source.getNValue(ii), NULL);
             }
         }
+
+        // Copy any hidden columns that follow normal visible ones.
+        if (m_schema->hiddenColumnCount() > 0) {
+            // If we ever add support for uninlined hidden columns,
+            // we'll need to do update this code.
+            assert(m_schema->getUninlinedObjectHiddenColumnCount() == 0);
+            ::memcpy(m_data + TUPLE_HEADER_SIZE + m_schema->offsetOfHiddenColumns(),
+                     source.m_data + TUPLE_HEADER_SIZE + m_schema->offsetOfHiddenColumns(),
+                     m_schema->lengthOfAllHiddenColumns());
+        }
+
         // This obscure assignment is propagating the tuple flags rather than leaving it to the caller.
         // TODO: It would be easier for the caller to simply set the values it wants upon return.
         m_data[0] = source.m_data[0];
@@ -679,7 +829,7 @@ inline void TableTuple::copy(const TableTuple &source) {
     assert(m_data);
 
 #ifndef NDEBUG
-    if( ! m_schema->isCompatibleForCopy(source.m_schema)) {
+    if( ! m_schema->isCompatibleForMemcpy(source.m_schema)) {
         std::ostringstream message;
         message << "src  tuple: " << source.debug("") << std::endl;
         message << "src schema: " << source.m_schema->debug() << std::endl;
@@ -695,8 +845,10 @@ inline void TableTuple::deserializeFrom(voltdb::SerializeInputBE &tupleIn, Pool 
     assert(m_schema);
     assert(m_data);
 
+    const int32_t columnCount  = m_schema->columnCount();
+    const int32_t hiddenColumnCount  = m_schema->hiddenColumnCount();
     tupleIn.readInt();
-    for (int j = 0; j < m_schema->columnCount(); ++j) {
+    for (int j = 0; j < columnCount; ++j) {
         const TupleSchema::ColumnInfo *columnInfo = m_schema->getColumnInfo(j);
 
         /**
@@ -715,6 +867,23 @@ inline void TableTuple::deserializeFrom(voltdb::SerializeInputBE &tupleIn, Pool 
         NValue::deserializeFrom(tupleIn, dataPool, dataPtr, columnInfo->getVoltType(),
                 columnInfo->inlined, static_cast<int32_t>(columnInfo->length), columnInfo->inBytes);
     }
+
+        for (int j = 0; j < hiddenColumnCount; ++j) {
+            const TupleSchema::ColumnInfo *columnInfo = m_schema->getHiddenColumnInfo(j);
+
+            // tupleIn may not have hidden column
+            if (!tupleIn.hasRemaining()) {
+                std::ostringstream message;
+                message << "TableTuple::deserializeFrom table tuple doesn't have enough space to deserialize the hidden column "
+                        << "(index=" << j << ")"
+                        << std::endl;
+                throw SerializableEEException(VOLT_EE_EXCEPTION_TYPE_EEEXCEPTION, message.str().c_str());
+            }
+
+            char *dataPtr = getWritableDataPtr(columnInfo);
+            NValue::deserializeFrom(tupleIn, dataPool, dataPtr, columnInfo->getVoltType(),
+                    columnInfo->inlined, static_cast<int32_t>(columnInfo->length), columnInfo->inBytes);
+        }
 }
 
 inline void TableTuple::deserializeFromDR(voltdb::SerializeInputLE &tupleIn,  Pool *dataPool) {
@@ -737,15 +906,25 @@ inline void TableTuple::deserializeFromDR(voltdb::SerializeInputLE &tupleIn,  Po
             setNValue(j, value);
         } else {
             char *dataPtr = getWritableDataPtr(columnInfo);
-            NValue::deserializeFrom<TUPLE_SERIALIZATION_NATIVE, BYTE_ORDER_LITTLE_ENDIAN>(
+            NValue::deserializeFrom<TUPLE_SERIALIZATION_DR, BYTE_ORDER_LITTLE_ENDIAN>(
                     tupleIn, dataPool, dataPtr,
                     columnInfo->getVoltType(), columnInfo->inlined,
                     static_cast<int32_t>(columnInfo->length), columnInfo->inBytes);
         }
     }
+
+    const int32_t hiddenColumnCount = m_schema->hiddenColumnCount();
+    for (int i = 0; i < hiddenColumnCount; i++) {
+        const TupleSchema::ColumnInfo * hiddenColumnInfo = m_schema->getHiddenColumnInfo(i);
+        char *dataPtr = getWritableDataPtr(hiddenColumnInfo);
+        NValue::deserializeFrom<TUPLE_SERIALIZATION_DR, BYTE_ORDER_LITTLE_ENDIAN>(
+                            tupleIn, dataPool, dataPtr,
+                            hiddenColumnInfo->getVoltType(), hiddenColumnInfo->inlined,
+                            static_cast<int32_t>(hiddenColumnInfo->length), hiddenColumnInfo->inBytes);
+    }
 }
 
-inline void TableTuple::serializeTo(voltdb::SerializeOutput &output) {
+inline void TableTuple::serializeTo(voltdb::SerializeOutput &output, bool includeHiddenColumns) {
     size_t start = output.reserveBytes(4);
 
     for (int j = 0; j < m_schema->columnCount(); ++j) {
@@ -754,29 +933,38 @@ inline void TableTuple::serializeTo(voltdb::SerializeOutput &output) {
         value.serializeTo(output);
     }
 
+    if (includeHiddenColumns) {
+        for (int j = 0; j < m_schema->hiddenColumnCount(); ++j) {
+            NValue value = getHiddenNValue(j);
+            value.serializeTo(output);
+        }
+    }
+
     // write the length of the tuple
     output.writeIntAt(start, static_cast<int32_t>(output.position() - start - sizeof(int32_t)));
 }
 
-inline
-void
-TableTuple::serializeToExport(ExportSerializeOutput &io,
+inline void TableTuple::serializeToExport(ExportSerializeOutput &io,
                               int colOffset, uint8_t *nullArray)
 {
     int columnCount = sizeInValues();
     for (int i = 0; i < columnCount; i++) {
-        // NULL doesn't produce any bytes for the NValue
-        // Handle it here to consolidate manipulation of
-        // the nullarray.
-        if (isNull(i)) {
-            // turn on i'th bit of nullArray
-            int byte = (colOffset + i) >> 3;
-            int bit = (colOffset + i) % 8;
-            int mask = 0x80 >> bit;
-            nullArray[byte] = (uint8_t)(nullArray[byte] | mask);
-            continue;
+        serializeColumnToExport(io, colOffset, i, nullArray);
+    }
+}
+
+inline void TableTuple::serializeToDR(ExportSerializeOutput &io,
+                              int colOffset, uint8_t *nullArray,
+                              const std::vector<int>* interestingColumns) {
+    if (!interestingColumns) {
+        serializeToExport(io, colOffset, nullArray);
+        serializeHiddenColumnsToDR(io);
+    } else {
+        std::vector<int> cols = *interestingColumns;
+        for (std::vector<int>::const_iterator cit = cols.begin(); cit != cols.end(); ++cit) {
+            serializeColumnToExport(io, colOffset, *cit, nullArray);
         }
-        getNValue(i).serializeToExport_withoutNull(io);
+        serializeHiddenColumnsToDR(io);
     }
 }
 
@@ -787,10 +975,20 @@ inline bool TableTuple::equals(const TableTuple &other) const {
     return equalsNoSchemaCheck(other);
 }
 
-inline bool TableTuple::equalsNoSchemaCheck(const TableTuple &other) const {
+inline bool TableTuple::equalsNoSchemaCheck(const TableTuple &other, bool includeHiddenColumns /*= false*/) const {
     for (int ii = 0; ii < m_schema->columnCount(); ii++) {
         const NValue lhs = getNValue(ii);
         const NValue rhs = other.getNValue(ii);
+        if (lhs.op_notEquals(rhs).isTrue()) {
+            return false;
+        }
+    }
+    if (!includeHiddenColumns) {
+        return true;
+    }
+    for (int ii = 0; ii < m_schema->hiddenColumnCount(); ii++) {
+        const NValue lhs = getHiddenNValue(ii);
+        const NValue rhs = other.getHiddenNValue(ii);
         if (lhs.op_notEquals(rhs).isTrue()) {
             return false;
         }
@@ -806,6 +1004,12 @@ inline void TableTuple::setAllNulls() const {
         const TupleSchema::ColumnInfo *columnInfo = m_schema->getColumnInfo(ii);
         NValue value = NValue::getNullValue(columnInfo->getVoltType());
         setNValue(ii, value);
+    }
+
+    for (int jj = 0; jj < m_schema->hiddenColumnCount(); ++jj) {
+        const TupleSchema::ColumnInfo *hiddenColumnInfo = m_schema->getHiddenColumnInfo(jj);
+        NValue value = NValue::getNullValue(hiddenColumnInfo->getVoltType());
+        setHiddenNValue(jj, value);
     }
 }
 

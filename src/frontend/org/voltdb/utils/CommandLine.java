@@ -89,6 +89,7 @@ public class CommandLine extends VoltDB.Configuration
         cl.m_vemTag = m_vemTag;
         cl.m_versionStringOverrideForTest = m_versionStringOverrideForTest;
         cl.m_versionCompatibilityRegexOverrideForTest = m_versionCompatibilityRegexOverrideForTest;
+        cl.m_buildStringOverrideForTest = m_buildStringOverrideForTest;
 
         // second, copy the derived class fields
         cl.includeTestOpts = includeTestOpts;
@@ -323,7 +324,8 @@ public class CommandLine extends VoltDB.Configuration
 
     public CommandLine target(BackendTarget target) {
         m_backend = target;
-        m_noLoadLibVOLTDB = (target == BackendTarget.HSQLDB_BACKEND);
+        m_noLoadLibVOLTDB = (target == BackendTarget.HSQLDB_BACKEND ||
+                             target == BackendTarget.POSTGRESQL_BACKEND);
         return this;
     }
     public BackendTarget target() {
@@ -453,7 +455,6 @@ public class CommandLine extends VoltDB.Configuration
     public List<String> createCommandLine() {
         List<String> cmdline = new ArrayList<String>(50);
         cmdline.add(javaExecutable);
-        cmdline.add("-DUSE_DR_V2=" + Boolean.getBoolean("USE_DR_V2"));
         cmdline.add("-XX:+HeapDumpOnOutOfMemoryError");
         cmdline.add("-Dsun.net.inetaddr.ttl=300");
         cmdline.add("-Dsun.net.inetaddr.negative.ttl=3600");
@@ -632,6 +633,10 @@ public class CommandLine extends VoltDB.Configuration
             cmdline.add("versionoverride");
             cmdline.add(m_versionStringOverrideForTest);
             cmdline.add(m_versionCompatibilityRegexOverrideForTest);
+            if (m_buildStringOverrideForTest != null) {
+                cmdline.add("buildstringoverride");
+                cmdline.add(m_buildStringOverrideForTest);
+            }
         }
 
         if (m_tag != null) {

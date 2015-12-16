@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map.Entry;
+import java.util.Set;
 
 import org.hsqldb_voltpatches.VoltXMLElement;
 import org.voltdb.VoltType;
@@ -31,6 +32,7 @@ import org.voltdb.expressions.AbstractExpression;
 import org.voltdb.expressions.ConstantValueExpression;
 import org.voltdb.expressions.FunctionExpression;
 import org.voltdb.planner.parseinfo.StmtSubqueryScan;
+import org.voltdb.utils.CatalogUtil;
 
 /**
  *
@@ -50,6 +52,13 @@ public class ParsedInsertStmt extends AbstractParsedStmt {
      * The SELECT statement for INSERT INTO ... SELECT.
      */
     private StmtSubqueryScan m_subquery = null;
+    /**
+     * An empty list for INSERT ... VALUES statements
+     * until they support subquery-based expressions,
+     * OR a list with one entry for an INSERT ... SELECT statement,
+     * to represent the top-level SELECT.
+     */
+    private final List<StmtSubqueryScan> m_scans = new ArrayList<>();
 
 
 
@@ -69,7 +78,10 @@ public class ParsedInsertStmt extends AbstractParsedStmt {
         assert(m_tableList.isEmpty());
 
         String tableName = stmtNode.attributes.get("table");
+        // Need to add the table to the cache. It may be required to resolve the
+        // correlated TVE in case of WHERE clause contains IN subquery
         Table table = getTableFromDB(tableName);
+        addTableToStmtCache(table, tableName);
 
         m_tableList.add(table);
 
@@ -79,12 +91,17 @@ public class ParsedInsertStmt extends AbstractParsedStmt {
             }
             else if (node.name.equalsIgnoreCase(SELECT_NODE_NAME)) {
                 m_subquery = new StmtSubqueryScan (parseSubquery(node), "__VOLT_INSERT_SUBQUERY__");
+                // Until scalar subqueries are allowed in INSERT ... VALUES statements,
+                // The top-level SELECT subquery in an INSERT ... SELECT statement
+                // is the only possible subselect in an INSERT statement.
+                m_scans.add(m_subquery);
             }
             else if (node.name.equalsIgnoreCase(UNION_NODE_NAME)) {
                 throw new PlanningErrorException(
                         "INSERT INTO ... SELECT is not supported for UNION or other set operations.");
             }
         }
+        calculateContentDeterminismMessage();
     }
 
     @Override
@@ -131,7 +148,7 @@ public class ParsedInsertStmt extends AbstractParsedStmt {
                 int id = Integer.parseInt(timeValue.split(":")[1]);
 
                 FunctionExpression funcExpr = new FunctionExpression();
-                funcExpr.setAttributes(name, name , id);
+                funcExpr.setAttributes(name, null, id);
 
                 funcExpr.setValueType(VoltType.TIMESTAMP);
                 funcExpr.setValueSize(VoltType.TIMESTAMP.getMaxLengthInBytes());
@@ -176,27 +193,14 @@ public class ParsedInsertStmt extends AbstractParsedStmt {
         return expr;
     }
 
-    public boolean isInsertWithSubquery() {
-        if (m_subquery != null) {
-            return true;
-        }
-        return false;
-    }
+    public StmtSubqueryScan getSubqueryScan() { return m_subquery; }
 
     /**
      * Return the subqueries for this statement.  For INSERT statements,
      * there can be only one.
      */
     @Override
-    public List<StmtSubqueryScan> getSubqueries() {
-        List<StmtSubqueryScan> subqueries = new ArrayList<>();
-
-        if (m_subquery != null) {
-            subqueries.add(m_subquery);
-        }
-
-        return subqueries;
-    }
+    public List<StmtSubqueryScan> getSubqueryScans() { return m_scans; }
 
     /**
      * @return the subquery for the insert stmt if there is one, null otherwise
@@ -213,4 +217,58 @@ public class ParsedInsertStmt extends AbstractParsedStmt {
         assert(getSubselectStmt() != null);
         return getSubselectStmt().isOrderDeterministicInSpiteOfUnorderedSubqueries();
     }
+
+    /**
+     * Returns true if the table being inserted into has a trigger executed
+     * when row limit is met
+     */
+    public boolean targetTableHasLimitRowsTrigger() {
+        assert(m_tableList.size() == 1);
+        return CatalogUtil.getLimitPartitionRowsDeleteStmt(m_tableList.get(0)) != null;
+    }
+
+    @Override
+    public Set<AbstractExpression> findAllSubexpressionsOfClass(Class< ? extends AbstractExpression> aeClass) {
+        Set<AbstractExpression> exprs = super.findAllSubexpressionsOfClass(aeClass);
+
+        for (AbstractExpression expr : m_columns.values()) {
+            if (expr != null) {
+                exprs.addAll(expr.findAllSubexpressionsOfClass(aeClass));
+            }
+        }
+
+        if (m_subquery != null) {
+            exprs.addAll(m_subquery.getSubqueryStmt().findAllSubexpressionsOfClass(aeClass));
+        }
+
+        return exprs;
+    }
+
+    /**
+     * Return the content determinism string of the subquery if there is one.
+     */
+    @Override
+    public String calculateContentDeterminismMessage() {
+        String ans = getContentDeterminismMessage();
+        if (ans != null) {
+            return ans;
+        }
+        if (m_subquery != null) {
+            updateContentDeterminismMessage(m_subquery.calculateContentDeterminismMessage());
+            return getContentDeterminismMessage();
+        }
+        if (m_columns != null) {
+            for (AbstractExpression expr : m_columns.values()) {
+                String emsg = expr.getContentDeterminismMessage();
+                if (emsg != null) {
+                    updateContentDeterminismMessage(emsg);
+                    return emsg;
+                }
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public boolean isDML() { return true; }
 }

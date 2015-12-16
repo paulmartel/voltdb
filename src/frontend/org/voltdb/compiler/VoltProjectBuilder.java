@@ -41,30 +41,41 @@ import javax.xml.bind.Marshaller;
 import org.voltdb.BackendTarget;
 import org.voltdb.ProcInfoData;
 import org.voltdb.catalog.Catalog;
+import org.voltdb.common.Constants;
 import org.voltdb.compiler.VoltCompiler.VoltCompilerException;
 import org.voltdb.compiler.deploymentfile.AdminModeType;
 import org.voltdb.compiler.deploymentfile.ClusterType;
 import org.voltdb.compiler.deploymentfile.CommandLogType;
+import org.voltdb.compiler.deploymentfile.ConnectionType;
 import org.voltdb.compiler.deploymentfile.DeploymentType;
+import org.voltdb.compiler.deploymentfile.DiskLimitType;
+import org.voltdb.compiler.deploymentfile.DrType;
 import org.voltdb.compiler.deploymentfile.ExportConfigurationType;
 import org.voltdb.compiler.deploymentfile.ExportType;
+import org.voltdb.compiler.deploymentfile.FeatureNameType;
 import org.voltdb.compiler.deploymentfile.HeartbeatType;
 import org.voltdb.compiler.deploymentfile.HttpdType;
 import org.voltdb.compiler.deploymentfile.HttpdType.Jsonapi;
+import org.voltdb.compiler.deploymentfile.ImportConfigurationType;
+import org.voltdb.compiler.deploymentfile.ImportType;
 import org.voltdb.compiler.deploymentfile.PartitionDetectionType;
 import org.voltdb.compiler.deploymentfile.PartitionDetectionType.Snapshot;
 import org.voltdb.compiler.deploymentfile.PathsType;
 import org.voltdb.compiler.deploymentfile.PathsType.Voltdbroot;
 import org.voltdb.compiler.deploymentfile.PropertyType;
+import org.voltdb.compiler.deploymentfile.ResourceMonitorType;
+import org.voltdb.compiler.deploymentfile.ResourceMonitorType.Memorylimit;
 import org.voltdb.compiler.deploymentfile.SchemaType;
 import org.voltdb.compiler.deploymentfile.SecurityProviderString;
 import org.voltdb.compiler.deploymentfile.SecurityType;
 import org.voltdb.compiler.deploymentfile.ServerExportEnum;
+import org.voltdb.compiler.deploymentfile.ServerImportEnum;
 import org.voltdb.compiler.deploymentfile.SnapshotType;
 import org.voltdb.compiler.deploymentfile.SystemSettingsType;
 import org.voltdb.compiler.deploymentfile.SystemSettingsType.Temptables;
 import org.voltdb.compiler.deploymentfile.UsersType;
 import org.voltdb.compiler.deploymentfile.UsersType.User;
+import org.voltdb.export.ExportDataProcessor;
 import org.voltdb.utils.NotImplementedException;
 
 import com.google_voltpatches.common.collect.ImmutableMap;
@@ -135,6 +146,14 @@ public class VoltProjectBuilder {
         public final String name;
         public String password;
         private final String roles[];
+        public boolean plaintext = true;
+
+        public UserInfo (final String name, final String password, final String roles[], final boolean plaintext){
+            this.name = name;
+            this.password = password;
+            this.roles = roles;
+            this.plaintext = plaintext;
+        }
 
         public UserInfo (final String name, final String password, final String roles[]){
             this.name = name;
@@ -207,26 +226,27 @@ public class VoltProjectBuilder {
         final boolean useCustomAdmin;
         final int adminPort;
         final boolean adminOnStartup;
+        final int clusterId;
 
         public DeploymentInfo(int hostCount, int sitesPerHost, int replication,
-                boolean useCustomAdmin, int adminPort, boolean adminOnStartup) {
+                boolean useCustomAdmin, int adminPort, boolean adminOnStartup, int id) {
             this.hostCount = hostCount;
             this.sitesPerHost = sitesPerHost;
             this.replication = replication;
             this.useCustomAdmin = useCustomAdmin;
             this.adminPort = adminPort;
             this.adminOnStartup = adminOnStartup;
+            this.clusterId = id;
         }
     }
 
     final LinkedHashSet<UserInfo> m_users = new LinkedHashSet<UserInfo>();
     final LinkedHashSet<Class<?>> m_supplementals = new LinkedHashSet<Class<?>>();
 
-    String m_elloader = null;         // loader package.Classname
-    private boolean m_elenabled;      // true if enabled; false if disabled
-
-    // zero defaults to first open port >= 8080.
+    // zero defaults to first open port >= the default port.
     // negative one means disabled in the deployment file.
+    // a null HTTP port or json flag indicates that the corresponding element should
+    // be omitted from the deployment XML.
     int m_httpdPortNo = -1;
     boolean m_jsonApiEnabled = true;
 
@@ -261,19 +281,40 @@ public class VoltProjectBuilder {
 
     private List<String> m_diagnostics;
 
-    private Properties m_elConfig;
-    private String m_elExportTarget = "file";
+    private List<HashMap<String, Object>> m_ilImportConnectors = new ArrayList<HashMap<String, Object>>();
+    private List<HashMap<String, Object>> m_elExportConnectors = new ArrayList<HashMap<String, Object>>();
 
     private Integer m_deadHostTimeout = null;
 
     private Integer m_elasticThroughput = null;
     private Integer m_elasticDuration = null;
     private Integer m_queryTimeout = null;
+    private String m_rssLimit = null;
+    private Integer m_resourceCheckInterval = null;
+    private Map<FeatureNameType, String> m_featureDiskLimits;
 
     private boolean m_useDDLSchema = false;
 
+    private String m_drMasterHost;
+    private Boolean m_drProducerEnabled = null;
+
     public VoltProjectBuilder setQueryTimeout(int target) {
         m_queryTimeout = target;
+        return this;
+    }
+
+    public VoltProjectBuilder setRssLimit(String limit) {
+        m_rssLimit = limit;
+        return this;
+    }
+
+    public VoltProjectBuilder setResourceCheckInterval(int seconds) {
+        m_resourceCheckInterval = seconds;
+        return this;
+    }
+
+    public VoltProjectBuilder setFeatureDiskLimits(Map<FeatureNameType, String> featureDiskLimits) {
+        m_featureDiskLimits = featureDiskLimits;
         return this;
     }
 
@@ -371,6 +412,12 @@ public class VoltProjectBuilder {
             else {
                 transformer.append(";");
             }
+        }
+    }
+
+    public void addDRTables(final String tableNames[]) {
+        for (final String drTable : tableNames) {
+            transformer.append("DR TABLE " + drTable + ";");
         }
     }
 
@@ -548,9 +595,33 @@ public class VoltProjectBuilder {
         m_ppdPrefix = ppdPrefix;
     }
 
+    public void addImport(boolean enabled, String importType, String importFormat, String importBundle, Properties config) {
+        HashMap<String, Object> importConnector = new HashMap<String, Object>();
+        importConnector.put("ilEnabled", enabled);
+        importConnector.put("ilModule", importBundle);
+
+        importConnector.put("ilConfig", config);
+        if (importFormat != null) {
+            importConnector.put("ilFormatter", importFormat);
+        }
+
+        if ((importType != null) && !importType.trim().isEmpty()) {
+            importConnector.put("ilImportType", importType);
+        } else {
+            importConnector.put("ilImportType", "custom");
+        }
+
+        m_ilImportConnectors.add(importConnector);
+    }
+
     public void addExport(boolean enabled, String exportTarget, Properties config) {
-        m_elloader = "org.voltdb.export.processors.GuestProcessor";
-        m_elenabled = enabled;
+        addExport(enabled, exportTarget, config, Constants.DEFAULT_EXPORT_CONNECTOR_NAME);
+    }
+
+    public void addExport(boolean enabled, String exportTarget, Properties config, String target) {
+        HashMap<String, Object> exportConnector = new HashMap<String, Object>();
+        exportConnector.put("elLoader", "org.voltdb.export.processors.GuestProcessor");
+        exportConnector.put("elEnabled", enabled);
 
         if (config == null) {
             config = new Properties();
@@ -558,11 +629,16 @@ public class VoltProjectBuilder {
                     "type","tsv", "batched","true", "with-schema","true", "nonce","zorag", "outdir","exportdata"
                     ));
         }
-        m_elConfig = config;
+        exportConnector.put("elConfig", config);
 
         if ((exportTarget != null) && !exportTarget.trim().isEmpty()) {
-            m_elExportTarget = exportTarget;
+            exportConnector.put("elExportTarget", exportTarget);
         }
+        else {
+            exportConnector.put("elExportTarget", "file");
+        }
+        exportConnector.put("elGroup", target);
+        m_elExportConnectors.add(exportConnector);
     }
 
     public void addExport(boolean enabled) {
@@ -574,6 +650,12 @@ public class VoltProjectBuilder {
         transformer.append("Export TABLE " + name + ";");
     }
 
+    public void setTableAsExportOnly(String name, String stream) {
+        assert(name != null);
+        assert(stream != null);
+        transformer.append("Export TABLE " + name + " TO STREAM " + stream + ";");
+    }
+
     public void setCompilerDebugPrintStream(final PrintStream out) {
         m_compilerDebugPrintStream = out;
     }
@@ -581,6 +663,20 @@ public class VoltProjectBuilder {
     public void setMaxTempTableMemory(int max)
     {
         m_maxTempTableMemory = max;
+    }
+
+    public void setDRMasterHost(String drMasterHost) {
+        m_drMasterHost = drMasterHost;
+    }
+
+    public void setDrProducerEnabled()
+    {
+        m_drProducerEnabled = true;
+    }
+
+    public void setDrProducerDisabled()
+    {
+        m_drProducerEnabled = false;
     }
 
     /**
@@ -597,14 +693,14 @@ public class VoltProjectBuilder {
     }
 
     public boolean compile(final String jarPath) {
-        return compile(jarPath, 1, 1, 0, null) != null;
+        return compile(jarPath, 1, 1, 0, null, 0) != null;
     }
 
     public boolean compile(final String jarPath,
             final int sitesPerHost,
             final int replication) {
         return compile(jarPath, sitesPerHost, 1,
-                replication, null) != null;
+                replication, null, 0) != null;
     }
 
     public boolean compile(final String jarPath,
@@ -612,7 +708,7 @@ public class VoltProjectBuilder {
             final int hostCount,
             final int replication) {
         return compile(jarPath, sitesPerHost, hostCount,
-                replication, null) != null;
+                replication, null, 0) != null;
     }
 
     public Catalog compile(final String jarPath,
@@ -620,9 +716,18 @@ public class VoltProjectBuilder {
             final int hostCount,
             final int replication,
             final String voltRoot) {
+       return compile(jarPath, sitesPerHost, hostCount, replication, voltRoot, 0);
+    }
+
+    public Catalog compile(final String jarPath,
+            final int sitesPerHost,
+            final int hostCount,
+            final int replication,
+            final String voltRoot,
+            final int clusterId) {
         VoltCompiler compiler = new VoltCompiler();
         if (compile(compiler, jarPath, voltRoot,
-                       new DeploymentInfo(hostCount, sitesPerHost, replication, false, 0, false),
+                       new DeploymentInfo(hostCount, sitesPerHost, replication, false, 0, false, clusterId),
                        m_ppdEnabled, m_snapshotPath, m_ppdPrefix)) {
             return compiler.getCatalog();
         } else {
@@ -633,21 +738,23 @@ public class VoltProjectBuilder {
     public boolean compile(
             final String jarPath, final int sitesPerHost,
             final int hostCount, final int replication,
-            final String voltRoot, final boolean ppdEnabled, final String snapshotPath, final String ppdPrefix)
+            final String voltRoot, final int clusterId,
+            final boolean ppdEnabled, final String snapshotPath,
+            final String ppdPrefix)
     {
         VoltCompiler compiler = new VoltCompiler();
         return compile(compiler, jarPath, voltRoot,
-                       new DeploymentInfo(hostCount, sitesPerHost, replication, false, 0, false),
+                       new DeploymentInfo(hostCount, sitesPerHost, replication, false, 0, false, clusterId),
                        ppdEnabled, snapshotPath, ppdPrefix);
     }
 
     public boolean compile(final String jarPath, final int sitesPerHost,
             final int hostCount, final int replication,
-            final int adminPort, final boolean adminOnStartup)
+            final int adminPort, final boolean adminOnStartup, final int clusterId)
     {
         VoltCompiler compiler = new VoltCompiler();
         return compile(compiler, jarPath, null,
-                       new DeploymentInfo(hostCount, sitesPerHost, replication, true, adminPort, adminOnStartup),
+                       new DeploymentInfo(hostCount, sitesPerHost, replication, true, adminPort, adminOnStartup, clusterId),
                        m_ppdEnabled,  m_snapshotPath, m_ppdPrefix);
     }
 
@@ -662,6 +769,7 @@ public class VoltProjectBuilder {
         assert(jarPath != null);
         assert(deployment == null || deployment.sitesPerHost >= 1);
         assert(deployment == null || deployment.hostCount >= 1);
+        assert(deployment == null || (deployment.clusterId >= 0 && deployment.clusterId <= 127));
 
         String deploymentVoltRoot = voltRoot;
         if (deployment != null) {
@@ -730,6 +838,7 @@ public class VoltProjectBuilder {
                 e.printStackTrace();
                 System.out.println("hostcount: " + deployment.hostCount);
                 System.out.println("sitesPerHost: " + deployment.sitesPerHost);
+                System.out.println("clusterId: " + deployment.clusterId);
                 System.out.println("replication: " + deployment.replication);
                 System.out.println("voltRoot: " + deploymentVoltRoot);
                 System.out.println("ppdEnabled: " + ppdEnabled);
@@ -813,7 +922,7 @@ public class VoltProjectBuilder {
      */
     private String writeDeploymentFile(
             String voltRoot, DeploymentInfo dinfo) throws IOException, JAXBException
-            {
+    {
         org.voltdb.compiler.deploymentfile.ObjectFactory factory =
             new org.voltdb.compiler.deploymentfile.ObjectFactory();
 
@@ -827,6 +936,7 @@ public class VoltProjectBuilder {
         cluster.setHostcount(dinfo.hostCount);
         cluster.setSitesperhost(dinfo.sitesPerHost);
         cluster.setKfactor(dinfo.replication);
+        cluster.setId(dinfo.clusterId);
         cluster.setSchema(m_useDDLSchema ? SchemaType.DDL : SchemaType.CATALOG);
 
         // <paths>
@@ -918,7 +1028,133 @@ public class VoltProjectBuilder {
             admin.setAdminstartup(dinfo.adminOnStartup);
         }
 
-        // <systemsettings>
+        deployment.setSystemsettings(createSystemSettingsType(factory));
+
+        // <users>
+        if (m_users.size() > 0) {
+            UsersType users = factory.createUsersType();
+            deployment.setUsers(users);
+
+            // <user>
+            for (final UserInfo info : m_users) {
+                User user = factory.createUsersTypeUser();
+                users.getUser().add(user);
+                user.setName(info.name);
+                user.setPassword(info.password);
+                user.setPlaintext(info.plaintext);
+
+                // build up user/roles.
+                if (info.roles.length > 0) {
+                    final StringBuilder roles = new StringBuilder();
+                    for (final String role : info.roles) {
+                        if (roles.length() > 0)
+                            roles.append(",");
+                        roles.append(role);
+                    }
+                    user.setRoles(roles.toString());
+                }
+            }
+        }
+
+        // <httpd>. Disabled unless port # is configured by a testcase
+        // Omit element(s) when null.
+        HttpdType httpd = factory.createHttpdType();
+        deployment.setHttpd(httpd);
+        httpd.setEnabled(m_httpdPortNo != -1);
+        httpd.setPort(m_httpdPortNo);
+        Jsonapi json = factory.createHttpdTypeJsonapi();
+        httpd.setJsonapi(json);
+        json.setEnabled(m_jsonApiEnabled);
+
+        // <export>
+        ExportType export = factory.createExportType();
+        deployment.setExport(export);
+
+        for (HashMap<String,Object> exportConnector : m_elExportConnectors) {
+            ExportConfigurationType exportConfig = factory.createExportConfigurationType();
+            exportConfig.setEnabled((boolean)exportConnector.get("elEnabled") && exportConnector.get("elLoader") != null &&
+                    !((String)exportConnector.get("elLoader")).trim().isEmpty());
+
+            ServerExportEnum exportTarget = ServerExportEnum.fromValue(((String)exportConnector.get("elExportTarget")).toLowerCase());
+            exportConfig.setType(exportTarget);
+            if (exportTarget.equals(ServerExportEnum.CUSTOM)) {
+                exportConfig.setExportconnectorclass(System.getProperty(ExportDataProcessor.EXPORT_TO_TYPE));
+            }
+
+            exportConfig.setStream((String)exportConnector.get("elGroup"));
+
+            Properties config = (Properties)exportConnector.get("elConfig");
+            if((config != null) && (config.size() > 0)) {
+                List<PropertyType> configProperties = exportConfig.getProperty();
+
+                for( Object nameObj: config.keySet()) {
+                    String name = String.class.cast(nameObj);
+
+                    PropertyType prop = factory.createPropertyType();
+                    prop.setName(name);
+                    prop.setValue(config.getProperty(name));
+
+                    configProperties.add(prop);
+                }
+            }
+            export.getConfiguration().add(exportConfig);
+        }
+
+        // <import>
+        ImportType importt = factory.createImportType();
+        deployment.setImport(importt);
+
+        for (HashMap<String,Object> importConnector : m_ilImportConnectors) {
+            ImportConfigurationType importConfig = factory.createImportConfigurationType();
+            importConfig.setEnabled((boolean)importConnector.get("ilEnabled"));
+            ServerImportEnum importType = ServerImportEnum.fromValue(((String)importConnector.get("ilImportType")).toLowerCase());
+            importConfig.setType(importType);
+            importConfig.setModule((String )importConnector.get("ilModule"));
+            String formatter = (String) importConnector.get("ilFormatter");
+            if (formatter != null) {
+                importConfig.setFormat(formatter);
+            }
+
+            Properties config = (Properties)importConnector.get("ilConfig");
+            if((config != null) && (config.size() > 0)) {
+                List<PropertyType> configProperties = importConfig.getProperty();
+
+                for( Object nameObj: config.keySet()) {
+                    String name = String.class.cast(nameObj);
+
+                    PropertyType prop = factory.createPropertyType();
+                    prop.setName(name);
+                    prop.setValue(config.getProperty(name));
+
+                    configProperties.add(prop);
+                }
+            }
+            importt.getConfiguration().add(importConfig);
+        }
+
+        DrType dr = factory.createDrType();
+        deployment.setDr(dr);
+        dr.setListen(m_drProducerEnabled);
+        if (m_drMasterHost != null && !m_drMasterHost.isEmpty()) {
+            ConnectionType conn = factory.createConnectionType();
+            dr.setConnection(conn);
+            conn.setSource(m_drMasterHost);
+        }
+
+        // Have some yummy boilerplate!
+        File file = File.createTempFile("myAppDeployment", ".tmp");
+        JAXBContext context = JAXBContext.newInstance(DeploymentType.class);
+        Marshaller marshaller = context.createMarshaller();
+        marshaller.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT,
+                Boolean.TRUE);
+        marshaller.marshal(doc, file);
+        final String deploymentPath = file.getPath();
+        return deploymentPath;
+    }
+
+
+    private SystemSettingsType createSystemSettingsType(org.voltdb.compiler.deploymentfile.ObjectFactory factory)
+    {
         SystemSettingsType systemSettingType = factory.createSystemSettingsType();
         Temptables temptables = factory.createSystemSettingsTypeTemptables();
         temptables.setMaxsize(m_maxTempTableMemory);
@@ -939,79 +1175,54 @@ public class VoltProjectBuilder {
             query.setTimeout(m_queryTimeout);
             systemSettingType.setQuery(query);
         }
+        if (m_rssLimit != null) {
+            ResourceMonitorType monitorType = initializeResourceMonitorType(systemSettingType, factory);
+            Memorylimit memoryLimit = factory.createResourceMonitorTypeMemorylimit();
+            memoryLimit.setSize(m_rssLimit);
+            monitorType.setMemorylimit(memoryLimit);
+        }
 
-        deployment.setSystemsettings(systemSettingType);
+        if (m_resourceCheckInterval != null) {
+            ResourceMonitorType monitorType = initializeResourceMonitorType(systemSettingType, factory);
+            monitorType.setFrequency(m_resourceCheckInterval);
+        }
 
-        // <users>
-        if (m_users.size() > 0) {
-            UsersType users = factory.createUsersType();
-            deployment.setUsers(users);
+        setupDiskLimitType(systemSettingType, factory);
 
-            // <user>
-            for (final UserInfo info : m_users) {
-                User user = factory.createUsersTypeUser();
-                users.getUser().add(user);
-                user.setName(info.name);
-                user.setPassword(info.password);
+        return systemSettingType;
+    }
 
-                // build up user/roles.
-                if (info.roles.length > 0) {
-                    final StringBuilder roles = new StringBuilder();
-                    for (final String role : info.roles) {
-                        if (roles.length() > 0)
-                            roles.append(",");
-                        roles.append(role);
-                    }
-                    user.setRoles(roles.toString());
-                }
+    private void setupDiskLimitType(SystemSettingsType systemSettingsType,
+            org.voltdb.compiler.deploymentfile.ObjectFactory factory) {
+
+        if (m_featureDiskLimits==null || m_featureDiskLimits.isEmpty()) {
+            return;
+        }
+
+        DiskLimitType diskLimit = factory.createDiskLimitType();
+        if (m_featureDiskLimits!=null && !m_featureDiskLimits.isEmpty()) {
+            for (FeatureNameType featureName : m_featureDiskLimits.keySet()) {
+                DiskLimitType.Feature feature = factory.createDiskLimitTypeFeature();
+                feature.setName(featureName);
+                feature.setSize(m_featureDiskLimits.get(featureName));
+                diskLimit.getFeature().add(feature);
             }
         }
 
-        // <httpd>. Disabled unless port # is configured by a testcase
-        HttpdType httpd = factory.createHttpdType();
-        deployment.setHttpd(httpd);
-        httpd.setEnabled(m_httpdPortNo != -1);
-        httpd.setPort(m_httpdPortNo);
-        Jsonapi json = factory.createHttpdTypeJsonapi();
-        httpd.setJsonapi(json);
-        json.setEnabled(m_jsonApiEnabled);
+        ResourceMonitorType monitorType = initializeResourceMonitorType(systemSettingsType, factory);
+        monitorType.setDisklimit(diskLimit);
+    }
 
-        // <export>
-        ExportType export = factory.createExportType();
-        deployment.setExport(export);
-
-        // this is for old generation export test suite backward compatibility
-        export.setEnabled(m_elenabled && m_elloader != null && !m_elloader.trim().isEmpty());
-
-        ServerExportEnum exportTarget = ServerExportEnum.fromValue(m_elExportTarget.toLowerCase());
-        export.setTarget(exportTarget);
-        if((m_elConfig != null) && (m_elConfig.size() > 0)) {
-            ExportConfigurationType exportConfig = factory.createExportConfigurationType();
-            List<PropertyType> configProperties = exportConfig.getProperty();
-
-            for( Object nameObj: m_elConfig.keySet()) {
-                String name = String.class.cast(nameObj);
-
-                PropertyType prop = factory.createPropertyType();
-                prop.setName(name);
-                prop.setValue(m_elConfig.getProperty(name));
-
-                configProperties.add(prop);
-            }
-            export.setConfiguration(exportConfig);
-        }
-
-        // Have some yummy boilerplate!
-        File file = File.createTempFile("myAppDeployment", ".tmp");
-        JAXBContext context = JAXBContext.newInstance(DeploymentType.class);
-        Marshaller marshaller = context.createMarshaller();
-        marshaller.setProperty(Marshaller.JAXB_FORMATTED_OUTPUT,
-                Boolean.TRUE);
-        marshaller.marshal(doc, file);
-        final String deploymentPath = file.getPath();
-        return deploymentPath;
+    private ResourceMonitorType initializeResourceMonitorType(SystemSettingsType systemSettingType,
+            org.voltdb.compiler.deploymentfile.ObjectFactory factory) {
+            ResourceMonitorType monitorType = systemSettingType.getResourcemonitor();
+            if (monitorType == null) {
+                monitorType = factory.createResourceMonitorType();
+                systemSettingType.setResourcemonitor(monitorType);
             }
 
+            return monitorType;
+    }
 
     public File getPathToVoltRoot() {
         return new File(m_voltRootPath);

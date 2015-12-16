@@ -133,8 +133,9 @@ public class MockExecutionEngine extends ExecutionEngine {
     }
 
     @Override
-    public byte[] loadTable(final int tableId, final VoltTable table, final long txnId, final long spHandle,
-        final long lastCommittedTxnId, boolean returnUniqueViolations, boolean shouldDRStream, long undoToken)
+    public byte[] loadTable(final int tableId, final VoltTable table, final long txnId,
+        final long spHandle, final long lastCommittedTxnId, long uniqueId,
+        boolean returnUniqueViolations, boolean shouldDRStream, long undoToken)
     throws EEException
     {
         return null;
@@ -160,7 +161,6 @@ public class MockExecutionEngine extends ExecutionEngine {
 
     @Override
     public void toggleProfiler(final int toggle) {
-        return;
     }
 
     @Override
@@ -175,7 +175,6 @@ public class MockExecutionEngine extends ExecutionEngine {
 
     @Override
     public void quiesce(long lastCommittedTxnId) {
-
     }
 
     @Override
@@ -214,9 +213,14 @@ public class MockExecutionEngine extends ExecutionEngine {
     }
 
     @Override
-    public void updateHashinator(TheHashinator.HashinatorConfig config)
-    {
+    public void updateHashinator(TheHashinator.HashinatorConfig config) {
+    }
 
+    @Override
+    public long applyBinaryLog(ByteBuffer log, long txnId, long spHandle, long lastCommittedSpHandle, long uniqueId,
+                               int remoteClusterId, long undoToken) throws EEException
+    {
+        throw new UnsupportedOperationException();
     }
 
     @Override

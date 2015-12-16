@@ -51,6 +51,7 @@ public class AuthenticatedConnectionCache {
     final int m_port;
     final int m_adminPort;
     final int m_targetSize; // goal size of the client cache
+    private boolean m_isClosing;
 
     /**
      * Metadata about a connection.
@@ -61,6 +62,7 @@ public class AuthenticatedConnectionCache {
         String user;
         byte[] hashedPassword;
         int passHash;
+        ClientAuthHashScheme scheme;
     }
 
     /**
@@ -100,7 +102,17 @@ public class AuthenticatedConnectionCache {
         m_targetSize = targetSize;
     }
 
-    public synchronized Client getClient(String userName, String password, byte[] hashedPassword, boolean admin) throws IOException {
+    public class ClientWithHashScheme {
+        public final Client m_client;
+        public final ClientAuthHashScheme m_scheme;
+
+        public ClientWithHashScheme(Client client, ClientAuthHashScheme scheme) {
+            m_client = client;
+            m_scheme = scheme;
+        }
+    }
+
+    public synchronized ClientWithHashScheme getClient(String userName, String password, byte[] hashedPassword, boolean admin) throws IOException {
         String userNameWithAdminSuffix = null;
         if (userName != null && !userName.trim().isEmpty()) {
             if (userName.endsWith(ADMIN_SUFFIX)) {
@@ -151,7 +163,8 @@ public class AuthenticatedConnectionCache {
             assert(m_unauthClient != null);
             assert(m_adminUnauthClient != null);
 
-            return admin ? m_adminUnauthClient : m_unauthClient;
+            return new ClientWithHashScheme(admin ? m_adminUnauthClient : m_unauthClient,
+                    ClientAuthHashScheme.HASH_SHA256);
         }
 
         // AUTHENTICATED
@@ -160,7 +173,10 @@ public class AuthenticatedConnectionCache {
             passHash = Arrays.hashCode(hashedPassword);
         }
 
-        Connection conn = m_connections.get(admin ? userNameWithAdminSuffix : userName);
+        ClientAuthHashScheme scheme = (hashedPassword == null ?
+                ClientAuthHashScheme.HASH_SHA256 : ClientAuthHashScheme.getByUnencodedLength(hashedPassword.length));
+        String ckey = (admin ? userNameWithAdminSuffix : userName) + scheme;
+        Connection conn = m_connections.get(ckey);
         if (conn != null) {
             if (conn.passHash != passHash) {
                 throw new IOException("Incorrect authorization credentials.");
@@ -183,10 +199,12 @@ public class AuthenticatedConnectionCache {
             // Add a callback listener for this client, to detect if
             // a connection gets closed/disconnected.  If this happens,
             // we need to remove it from the m_conections cache.
-            ClientConfig config = new ClientConfig(userName, password, true, new StatusListener(conn));
+            //detect hash scheme from length of hashed password if sent instead of password.
+            ClientConfig config = new ClientConfig(userName, password, true, new StatusListener(conn), scheme);
 
             conn.user = userName;
             conn.client = (ClientImpl) ClientFactory.createClient(config);
+            conn.scheme = scheme;
             try
             {
                 conn.client.createConnectionWithHashedCredentials(
@@ -208,10 +226,10 @@ public class AuthenticatedConnectionCache {
                 conn = null;
                 throw ioe;
             }
-            m_connections.put(admin ? userNameWithAdminSuffix : userName, conn);
+            m_connections.put(ckey, conn);
             attemptToShrinkPoolIfNeeded();
         }
-        return conn.client;
+        return new ClientWithHashScheme(conn.client, scheme);
     }
 
     private Predicate<InetSocketAddress> onAdminPort = new Predicate<InetSocketAddress>() {
@@ -224,10 +242,23 @@ public class AuthenticatedConnectionCache {
     /**
      * Dec-ref a client.
      * @param client The client to release.
+     * @param force this is sent true in case we just lost network and so the connection I thought this will not happen
+     * in internally connected clients but have seen it in strange/unknown/unreproducible cases.
      */
-    public synchronized void releaseClient(Client client) {
+    public synchronized void releaseClient(Client client, ClientAuthHashScheme scheme, boolean force) {
         ClientImpl ci = (ClientImpl) client;
-
+        if (force) {
+            if (client == this.m_unauthClient) {
+                closeClient(this.m_unauthClient);
+                this.m_unauthClient = null;
+                return;
+            }
+            if (client == this.m_adminUnauthClient) {
+                closeClient(this.m_adminUnauthClient);
+                this.m_adminUnauthClient = null;
+                return;
+            }
+        }
         // if no username, this is the unauth client
         if (ci.getUsername().length() == 0) {
             return;
@@ -236,44 +267,60 @@ public class AuthenticatedConnectionCache {
         if (FluentIterable.from(ci.getConnectedHostList()).allMatch(onAdminPort)) {
             userNameBuilder.append(ADMIN_SUFFIX);
         }
-
-        Connection conn = m_connections.get(userNameBuilder.toString());
-        if (conn == null) {
-            throw new RuntimeException("Released client not in pool.");
+        String ckey = userNameBuilder.toString() + scheme;
+        Connection conn = m_connections.get(ckey);
+        if (conn == null) { // already closed and cleaned up by closeAll. Nothing more to do.
+            return;
         }
-        conn.refCount--;
+        if (force) {
+            //Dont bother with target size of pool and remove dead connection.
+            m_connections.remove(ckey);
+            closeClient(conn.client);
+        } else {
+            conn.refCount--;
+        }
         attemptToShrinkPoolIfNeeded();
     }
 
+    private synchronized void closeClient(Client client)
+    {
+        if (client == null) return;
+
+        try {
+            client.drain();
+        } catch (Exception ex) {
+            //DONTCARE
+        }
+        try {
+            client.close();
+        } catch (Exception ex) {
+            //DONTCARE
+        }
+    }
+
+    public boolean isClosing() {
+        return m_isClosing;
+    }
+
+    //Close all and just clear stuff.
     public synchronized void closeAll()
     {
+        m_isClosing = true;
         if (m_unauthClient != null)
         {
-            try {
-                m_unauthClient.drain();
-                m_unauthClient.close();
-            } catch (InterruptedException ex) {
-                throw new RuntimeException("Unable to close unauthenticated client.", ex);
-            }
+            closeClient(m_unauthClient);
+            m_unauthClient = null;
         }
         if (m_adminUnauthClient != null)
         {
-            try {
-                m_adminUnauthClient.drain();
-                m_adminUnauthClient.close();
-            } catch (InterruptedException ex) {
-                throw new RuntimeException("Unable to close unauthenticated admin client.", ex);
-            }
+            closeClient(m_adminUnauthClient);
+            m_adminUnauthClient = null;
         }
         for (Entry<String, Connection> e : m_connections.entrySet())
         {
-            try {
-                e.getValue().client.drain();
-                e.getValue().client.close();
-            } catch (InterruptedException ex) {
-                throw new RuntimeException("Unable to close client from pool.", ex);
-            }
+            closeClient(e.getValue().client);
         }
+        m_connections.clear();
     }
 
     /**
@@ -285,12 +332,7 @@ public class AuthenticatedConnectionCache {
             for (Entry<String, Connection> e : m_connections.entrySet()) {
                 if (e.getValue().refCount <= 0) {
                     m_connections.remove(e.getKey());
-                    try {
-                        e.getValue().client.drain();
-                        e.getValue().client.close();
-                    } catch (InterruptedException ex) {
-                        throw new RuntimeException("Unable to close client from pool.", ex);
-                    }
+                    closeClient(e.getValue().client);
                     break; // from the for to continue the while
                 }
             }

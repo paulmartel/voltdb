@@ -23,9 +23,16 @@
 
 package vmcTest.pages
 
+import java.util.List;
+import java.util.Map;
+
 import geb.*
 import geb.navigator.Navigator
+import geb.waiting.WaitTimeoutException
+
 import org.openqa.selenium.JavascriptExecutor
+import org.openqa.selenium.StaleElementReferenceException
+import org.openqa.selenium.WebElement
 
 /**
  * This class represents a generic VoltDB Management Center page (without
@@ -34,16 +41,26 @@ import org.openqa.selenium.JavascriptExecutor
  * (& DB Monitor Catalog Report, etc.).
  */
 class VoltDBManagementCenterPage extends Page {
+    static Boolean securityEnabled = null;
 
-    static url = 'http://localhost:8080/'
+    static url = ''  // relative to the baseUrl
     static content = {
         navTabs { $('#nav') }
         dbMonitorTab { navTabs.find('#navDbmonitor') }
+	adminTab { navTabs.find('#navAdmin') }
         schemaTab    { navTabs.find('#navSchema') }
         sqlQueryTab  { navTabs.find('#navSqlQuery') }
         dbMonitorLink(to: DbMonitorPage) { dbMonitorTab.find('a') }
+	adminLink(to: AdminPage) { adminTab.find('a') }
         schemaLink   (to: SchemaPage)    { schemaTab.find('a') }
         sqlQueryLink (to: SqlQueryPage)  { sqlQueryTab.find('a') }
+        loginDialog  (required: false) { $('#loginBox') }
+        usernameInput   (required: false) { loginDialog.find('input#username') }
+        passwordInput   (required: false) { loginDialog.find('input#password') }
+        loginButton  (required: false) { loginDialog.find('#LoginBtn') }
+	
+	header { module Header }
+        footer { module Footer }	
     }
     static at = {
         title == 'VoltDB Management Center'
@@ -59,11 +76,26 @@ class VoltDBManagementCenterPage extends Page {
      * for visibility.
      * @return true if at least one of the specified elements is displayed.
      */
-    protected boolean atLeastOneIsDisplayed(Navigator navElements) {
+    protected boolean isDisplayed(Navigator navElements) {
         for (navElem in navElements.findAll()) {
             if (navElem.displayed) {
                 return true
             }
+        }
+        return false
+    }
+
+    /**
+     * Returns true if the specified element is stale, i.e., no longer present
+     * in the DOM.
+     * @param webElement - a WebElement whose staleness is to be checked.
+     * @return true if the specified WebElement is stale.
+     */
+    protected boolean isStale(WebElement webElement) {
+        try {
+            webElement.isDisplayed()
+        } catch (StaleElementReferenceException e) {
+            return true
         }
         return false
     }
@@ -91,11 +123,11 @@ class VoltDBManagementCenterPage extends Page {
      * should become visible.
      */
     protected void clickToDisplay(Navigator clickElement, Navigator displayElements) {
-        if (!atLeastOneIsDisplayed(displayElements)) {
+        if (!isDisplayed(displayElements)) {
             scrollIntoView(clickElement)
             clickElement.click()
             scrollIntoView(displayElements.first())
-            waitFor { atLeastOneIsDisplayed(displayElements) }
+            waitFor { isDisplayed(displayElements) }
         }
     }
 
@@ -108,11 +140,105 @@ class VoltDBManagementCenterPage extends Page {
      * should become invisible.
      */
     protected void clickToNotDisplay(Navigator clickElement, Navigator displayElements) {
-        if (atLeastOneIsDisplayed(displayElements)) {
+        if (isDisplayed(displayElements)) {
             scrollIntoView(clickElement)
             clickElement.click()
-            waitFor { !atLeastOneIsDisplayed(displayElements) }
+            waitFor { !isDisplayed(displayElements) }
         }
+    }
+
+    /**
+     * Used to specify whether you want a table's contents returned with the
+     * column headers as displayed, converted to lower case, or converted to
+     * upper case.
+     */
+    enum ColumnHeaderCase {
+        AS_IS,
+        TO_LOWER_CASE,
+        TO_UPPER_CASE
+    }
+
+    /**
+     * Returns the contents of the element specified by a Navigator, which
+     * should refer to a "table" HTML element. If columnWise is true, the table
+     * contents are returned in the form of a Map, with each element a List of
+     * Strings; each Key of the Map is a column header of the table, and its
+     * List contains the displayed text of that column. If columnWise is false,
+     * the table contents are returned in the form of a List of List of String;
+     * each List element represents a row of the table, containing a List of
+     * all the elements in that row.
+     * @param tableElement - a Navigator specifying the "table" element whose
+     * contents are to be returned.
+     * @param colHeaderFormat - the case in which you want the table's column
+     * headers returned: converted to lower case, to upper case, or as-is.
+     * @param columnWise - if true, the table contents are returned column-wise,
+     * as a Map<String,List<String>>; if false, they're returned row-wise, as a
+     * List<List<String>>.
+     * @return a List or Map representing the contents of the specified table
+     * element.
+     */
+    private def getTableContents(Navigator tableElement,
+                                 ColumnHeaderCase colHeaderFormat,
+                                 boolean columnWise) {
+        def result = []
+        def columnHeaders = tableElement.find('thead').first().find('th')*.text()
+        if (ColumnHeaderCase.TO_LOWER_CASE.equals(colHeaderFormat)) {
+            columnHeaders = columnHeaders.collect { it.toLowerCase() }
+        } else if (ColumnHeaderCase.TO_UPPER_CASE.equals(colHeaderFormat)) {
+            columnHeaders = columnHeaders.collect { it.toUpperCase() }
+        }
+        def rows = tableElement.find('tbody').find('tr')
+        // Remove "empty" (or hidden) rows (those with no visible text)
+        for (int i=rows.size()-1; i>= 0; i--) {
+            String rowText = rows.getAt(i).text()
+            if (rowText == null || rowText.isEmpty()) {
+                rows = rows.remove(i);
+            }
+        }
+        if (columnWise) {
+            result = [:]
+            def makeColumn = { index,rowset -> rowset.collect { row -> row.find('td',index).text() } }
+            def colNum = 0
+            columnHeaders.each { result.put(it, makeColumn(colNum++, rows)) }
+            return result
+        } else {
+            result.add(columnHeaders)
+            rows.each { result.add(it.find('td')*.text()) }
+        }
+        return result
+    }
+
+    /**
+     * Returns the contents of the element specified by a Navigator, which
+     * should refer to a "table" HTML element. The table contents are returned
+     * in the form of a Map, with each element a List of Strings; each Key of
+     * the Map is a column header of the table, and its List contains the
+     * displayed text of that column. 
+     * @param tableElement - a Navigator specifying the "table" element whose
+     * contents are to be returned.
+     * @param colHeaderFormat - the case in which you want the table's column
+     * headers returned: converted to lower case, to upper case, or as-is.
+     * @return a Map representing the contents of the specified table element.
+     */
+    protected Map<String,List<String>> getTableByColumn(Navigator tableElement,
+                ColumnHeaderCase colHeaderFormat=ColumnHeaderCase.AS_IS) {
+        return getTableContents(tableElement, colHeaderFormat, true)
+    }
+
+    /**
+     * Returns the contents of the element specified by a Navigator, which
+     * should refer to a "table" HTML element. The table contents are returned
+     * in the form of a List of List of String; each List element represents a
+     * row of the table, containing a List of all the elements in that row.
+     * @param tableElement - a Navigator specifying the "table" element whose
+     * contents are to be returned.
+     * @param colHeaderFormat - the case in which you want the table's column
+     * headers returned: converted to lower case, to upper case, or as-is.
+     * @return a List representing the contents of the specified table element.
+     */
+    protected List<List<String>> getTableByRow(Navigator tableElement,
+                ColumnHeaderCase colHeaderFormat=ColumnHeaderCase.AS_IS) {
+        return getTableContents(tableElement, colHeaderFormat, false)
     }
 
     /**
@@ -122,6 +248,19 @@ class VoltDBManagementCenterPage extends Page {
      */
     def boolean isDbMonitorPageOpen() {
         if (dbMonitorTab.attr('class') == 'active') {
+            return true
+        } else {
+            return false
+        }
+    }
+
+    /**
+     * Returns true if the current page is a AdminPage (i.e., the "Admin"
+     * tab of the VoltDB Management Center page is currently open).
+     * @return true if a AdminPage is currently open.
+     */
+    def boolean isAdminPageOpen() {
+        if (adminTab.attr('class') == 'active') {
             return true
         } else {
             return false
@@ -164,10 +303,22 @@ class VoltDBManagementCenterPage extends Page {
         }
     }
 
+/**
+     * Clicks the "Admin" link, opening the "Admin" page (or tab);
+     * if the "Admin" page is already open, no action is taken.
+     */
+    def void openAdminPage() {
+        if (!isAdminPageOpen()) {
+            adminLink.click()
+        }
+    }
+
     /**
      * Clicks the "Schema" link, opening the "Schema" page (or tab);
      * if the "Schema" page is already open, no action is taken.
      */
+   
+
     def void openSchemaPage() {
         if (!isSchemaPageOpen()) {
             schemaLink.click()
@@ -181,6 +332,117 @@ class VoltDBManagementCenterPage extends Page {
     def void openSqlQueryPage() {
         if (!isSqlQueryPageOpen()) {
             sqlQueryLink.click()
+            waitFor() { !$('#tabMain').find('#tabScroller').text().isEmpty() }
         }
     }
+
+    /**
+     * Returns whether or not a Login dialog is currently open.
+     * @return true if a Login dialog is currently open.
+     */
+    def boolean isLoginDialogOpen() {
+        if (securityEnabled == null) {
+            try {
+                waitFor() { loginDialog.displayed }
+                securityEnabled = true
+            } catch (WaitTimeoutException e) {
+                securityEnabled = false
+            }
+        }
+        if (securityEnabled) {
+            try {
+                waitFor() { loginDialog.displayed }
+            } catch (WaitTimeoutException e) {
+                // do nothing
+            }
+        }
+        if (loginDialog.displayed) {
+            return true
+        } else {
+            return false
+        }
+    }
+
+    /**
+     * Logs in, via the Login dialog (which is assumed to be open on the
+     * current page), using the specified username and password (or their
+     * default values, if not specified).
+     * @param username - the username to be used for login.
+     * @param password - the password to be used for login.
+     */
+    def void login(username="admin", password="voltdb") {
+        usernameInput = username
+        passwordInput = password
+        loginButton.click()
+        waitFor() { !loginDialog.displayed }
+    }
+
+    /**
+     * Checks whether a Login dialog is open on the current page; and if so,
+     * logs in, using the specified username and password (or their default
+     * values, if not specified).
+     * @param username - the username to be used for login.
+     * @param password - the password to be used for login.
+     */
+    def boolean loginIfNeeded(username="admin", password="voltdb") {
+        if (isLoginDialogOpen()) {
+            println "Login dialog is open; will attempt to login."
+            login(username, password)
+            return true
+        } else {
+            return false
+        }
+    }
+
+    String user = getUsername()
+    String pass = getPassword()
+
+    def void loginValid(username = user, password = pass) {
+        usernameInput = username
+        passwordInput = password
+        loginButton.click()
+        waitFor() { !loginDialog.displayed }
+
+    }
+
+	def void loginEmpty(username = "", password = "") {
+        usernameInput = username
+        passwordInput = password
+        loginButton.click()
+		waitFor() { !loginDialog.displayed }
+   
+    }
+    
+    def void loginInvalid(username = "invalid", password = "invalid") {
+        usernameInput = username
+        passwordInput = password
+        loginButton.click()
+		waitFor() { !loginDialog.displayed }
+   
+    }
+
+    def String getUsername() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/users.txt"))
+        String username
+
+        while((username = br.readLine()) != "#username") {
+        }
+
+        username = br.readLine()
+
+        return username
+    }
+
+    def String getPassword() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/users.txt"))
+        String password
+
+        while((password = br.readLine()) != "#password") {
+        }
+
+        password = br.readLine()
+
+        return password
+    }
+
 }

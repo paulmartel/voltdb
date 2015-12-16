@@ -26,7 +26,8 @@ package org.voltdb.jni;
 import static org.mockito.Matchers.contains;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
-import junit.framework.TestCase;
+
+import java.util.Arrays;
 
 import org.mockito.Mockito;
 import org.voltcore.logging.VoltLogger;
@@ -48,24 +49,65 @@ import org.voltdb.planner.ActivePlanRepository;
 import org.voltdb.utils.CatalogUtil;
 import org.voltdb.utils.Encoder;
 
+import junit.framework.TestCase;
+
 public class TestFragmentProgressUpdate extends TestCase {
 
-    private long READ_ONLY_TOKEN = Long.MAX_VALUE;
-    private long WRITE_TOKEN = 0;
+    private final long READ_ONLY_TOKEN = Long.MAX_VALUE;
+    private final long WRITE_TOKEN = 0;
 
+    /**
+     * This local class is intended to make it easy to preserve default
+     * EE settings for initial log duration (the time required for a fragment
+     * to execute before an initial warning is written to the log),
+     * and the timeout latency (time after which long-running read-only queries
+     * will be canceled.)
+     *
+     * This avoids the situation where tests fail because a previous test tweaked
+     * an EE setting.
+     */
+    @SuppressWarnings("deprecation")
+    private class AutoEngineSettings implements AutoCloseable {
+
+        private final int m_origTimeoutLatency;
+        private final long m_origInitialLogDuration;
+
+        AutoEngineSettings() {
+            m_origTimeoutLatency = m_ee.getBatchTimeout();
+            m_origInitialLogDuration = m_ee.getInitialLogDurationForTest();
+        }
+
+        public void setTimeoutLatency(int timeoutLatency) {
+            m_ee.setBatchTimeout(timeoutLatency);
+        }
+
+        public void setInitialLogDuration(long initialLogDuration) {
+            m_ee.setInitialLogDurationForTest(initialLogDuration);
+        }
+
+        // Sets execution engine settings back to what they were.
+        @Override
+        public void close() throws Exception {
+            m_ee.setBatchTimeout(m_origTimeoutLatency);
+            m_ee.setInitialLogDurationForTest(m_origInitialLogDuration);
+        }
+
+    }
+
+    @SuppressWarnings("deprecation")
     public void testFragmentProgressUpdate() throws Exception {
         m_ee.loadCatalog( 0, m_catalog.serialize());
 
-        m_tableSize = 5001;
-        m_longOpthreshold = 10000;
+        int tableSize = 5001;
+        int longOpthreshold = 10000;
         m_warehousedata.clearRowData();
 
-        for (int i = 0; i < m_tableSize; ++i) {
+        for (int i = 0; i < tableSize; ++i) {
             m_warehousedata.addRow(i, "name" + i, "st1", "st2", "city", "ST", "zip", 0, 0);
         }
 
-        m_ee.loadTable(WAREHOUSE_TABLEID, m_warehousedata, 0, 0, 0, false, false, WRITE_TOKEN);
-        assertEquals(m_tableSize, m_ee.serializeTable(WAREHOUSE_TABLEID).getRowCount());
+        m_ee.loadTable(WAREHOUSE_TABLEID, m_warehousedata, 0, 0, 0, 0, false, false, WRITE_TOKEN);
+        assertEquals(tableSize, m_ee.serializeTable(WAREHOUSE_TABLEID).getRowCount());
         System.out.println("Rows loaded to table "+m_ee.serializeTable(WAREHOUSE_TABLEID).getRowCount());
 
         Statement selectStmt = m_testProc.getStatements().getIgnoreCase("warehouse_select");
@@ -95,7 +137,7 @@ public class TestFragmentProgressUpdate extends TestCase {
         // Like many fully successful operations, a single row fetch counts as 2 logical row operations,
         // one for locating the row and one for retrieving it.
         assertEquals(1, m_ee.m_callsFromEE);
-        assertEquals(m_longOpthreshold, m_ee.m_lastTuplesAccessed);
+        assertEquals(longOpthreshold, m_ee.m_lastTuplesAccessed);
         assertTrue(450000 < m_ee.m_currMemoryInBytes);
         assertTrue(550000 > m_ee.m_currMemoryInBytes);
         assertTrue(450000 < m_ee.m_peakMemoryInBytes);
@@ -103,19 +145,20 @@ public class TestFragmentProgressUpdate extends TestCase {
         assertTrue(m_ee.m_peakMemoryInBytes >= m_ee.m_currMemoryInBytes);
     }
 
+    @SuppressWarnings("deprecation")
     public void testTwoUpdates() throws Exception {
         m_ee.loadCatalog( 0, m_catalog.serialize());
 
-        m_tableSize = 10000;
-        m_longOpthreshold = 10000;
+        int tableSize = 10000;
+        int longOpthreshold = 10000;
         m_warehousedata.clearRowData();
 
-        for (int i = 0; i < m_tableSize; ++i) {
+        for (int i = 0; i < tableSize; ++i) {
             m_warehousedata.addRow(i, "name" + i, "st1", "st2", "city", "ST", "zip", 0, 0);
         }
 
-        m_ee.loadTable(WAREHOUSE_TABLEID, m_warehousedata, 0, 0, 0, false, false, Long.MAX_VALUE);
-        assertEquals(m_tableSize, m_ee.serializeTable(WAREHOUSE_TABLEID).getRowCount());
+        m_ee.loadTable(WAREHOUSE_TABLEID, m_warehousedata, 0, 0, 0, 0, false, false, Long.MAX_VALUE);
+        assertEquals(tableSize, m_ee.serializeTable(WAREHOUSE_TABLEID).getRowCount());
         System.out.println("Rows loaded to table "+m_ee.serializeTable(WAREHOUSE_TABLEID).getRowCount());
 
         Statement selectStmt = m_testProc.getStatements().getIgnoreCase("warehouse_select");
@@ -148,7 +191,7 @@ public class TestFragmentProgressUpdate extends TestCase {
         // Like many fully successful operations, a single row fetch counts as 2 logical row operations,
         // one for locating the row and one for retrieving it.
         assertEquals(2, m_ee.m_callsFromEE);
-        assertEquals(m_longOpthreshold * m_ee.m_callsFromEE, m_ee.m_lastTuplesAccessed);
+        assertEquals(longOpthreshold * m_ee.m_callsFromEE, m_ee.m_lastTuplesAccessed);
         assertTrue(900000 < m_ee.m_currMemoryInBytes);
         assertTrue(1100000 > m_ee.m_currMemoryInBytes);
         assertTrue(900000 < m_ee.m_peakMemoryInBytes);
@@ -197,7 +240,7 @@ public class TestFragmentProgressUpdate extends TestCase {
                 3, 3, 2, 42, Long.MAX_VALUE);
         assertTrue(m_ee.m_callsFromEE > 2);
         // here the m_lastTuplesAccessed is just the same as threshold, since we start a new fragment
-        assertEquals(m_longOpthreshold, m_ee.m_lastTuplesAccessed);
+        assertEquals(longOpthreshold, m_ee.m_lastTuplesAccessed);
         assertTrue(450000 < m_ee.m_currMemoryInBytes);
         assertTrue(550000 > m_ee.m_currMemoryInBytes);
         assertTrue(450000 < m_ee.m_peakMemoryInBytes);
@@ -208,19 +251,20 @@ public class TestFragmentProgressUpdate extends TestCase {
         assertTrue(m_ee.m_peakMemoryInBytes < previousPeakMemory);
     }
 
+    @SuppressWarnings("deprecation")
     public void testPeakLargerThanCurr() throws Exception {
         m_ee.loadCatalog( 0, m_catalog.serialize());
 
-        m_tableSize = 20000;
-        m_longOpthreshold = 10000;
+        int tableSize = 20000;
+        int longOpthreshold = 10000;
         m_warehousedata.clearRowData();
 
-        for (int i = 0; i < m_tableSize; ++i) {
+        for (int i = 0; i < tableSize; ++i) {
             m_warehousedata.addRow(i, "name" + i, "st1", "st2", "city", "ST", "zip", 0, 0);
         }
 
-        m_ee.loadTable(WAREHOUSE_TABLEID, m_warehousedata, 0, 0, 0, false, false, WRITE_TOKEN);
-        assertEquals(m_tableSize, m_ee.serializeTable(WAREHOUSE_TABLEID).getRowCount());
+        m_ee.loadTable(WAREHOUSE_TABLEID, m_warehousedata, 0, 0, 0, 0, false, false, WRITE_TOKEN);
+        assertEquals(tableSize, m_ee.serializeTable(WAREHOUSE_TABLEID).getRowCount());
         System.out.println("Rows loaded to table "+m_ee.serializeTable(WAREHOUSE_TABLEID).getRowCount());
 
         Statement selectStmt = m_testProc.getStatements().getIgnoreCase("warehouse_join");
@@ -248,66 +292,183 @@ public class TestFragmentProgressUpdate extends TestCase {
                 null,
                 new ParameterSet[] { params },
                 new String[] { selectStmt.getSqltext() },
-                3, 3, 2, 42, Long.MAX_VALUE);
+                3, 3, 2, 42, READ_ONLY_TOKEN);
 
         // If want to see the stats, please uncomment the following line.
         // It is '8 393216 262144' on my machine.
         //System.out.println(m_ee.m_callsFromEE +" " + m_ee.m_peakMemoryInBytes + " "+ m_ee.m_currMemoryInBytes);
-        assertEquals(m_longOpthreshold * m_ee.m_callsFromEE, m_ee.m_lastTuplesAccessed);
+        assertEquals(longOpthreshold * m_ee.m_callsFromEE, m_ee.m_lastTuplesAccessed);
         assertTrue(m_ee.m_peakMemoryInBytes > m_ee.m_currMemoryInBytes);
     }
 
-    @SuppressWarnings("deprecation")
     public void testProgressUpdateLogSqlStmt() throws Exception {
-        // Set the log duration to be very short, to ensure that a message will be logged.
-        m_ee.setInitialLogDurationForTest(1);
-
-        verifyLongRunningQueries(50, 0, "item_crazy_join", true);
+        verifyLongRunningQueries(50, 0, "item_crazy_join", 5, true, SqlTextExpectation.SQL_STATEMENT);
     }
 
-    private void verifyLongRunningQueries(int scale, int timeout, String query, boolean readOnly) {
-        m_tableSize = scale;
+    public void testProgressUpdateLogNoSqlStmt() throws Exception {
+        verifyLongRunningQueries(50, 0, "item_crazy_join", 5, true, SqlTextExpectation.NO_STATEMENT);
+    }
+
+    public void testProgressUpdateLogSqlStmtList() throws Exception {
+        verifyLongRunningQueries(50, 0, "item_crazy_join", 5, true, SqlTextExpectation.STATEMENT_LIST);
+    }
+
+    public void testProgressUpdateLogSqlStmtRW() throws Exception {
+        verifyLongRunningQueries(50, 0, "item_crazy_join", 5, false, SqlTextExpectation.SQL_STATEMENT);
+    }
+
+    public void testProgressUpdateLogNoSqlStmtRW() throws Exception {
+        verifyLongRunningQueries(50, 0, "item_crazy_join", 5, false, SqlTextExpectation.NO_STATEMENT);
+    }
+
+    public void testProgressUpdateLogSqlStmtListRW() throws Exception {
+        verifyLongRunningQueries(50, 0, "item_crazy_join", 5, false, SqlTextExpectation.STATEMENT_LIST);
+    }
+
+    private enum SqlTextExpectation {
+            SQL_STATEMENT,
+            NO_STATEMENT,
+            STATEMENT_LIST
+    }
+
+    /**
+     * A simple class that encapsulates the fragment ID and text for
+     * a SQL statement, given the name of SQLStmt object.
+     *
+     * Will also put the plan fragment into the ActivePlanRepository.
+     */
+    private class FragIdAndText {
+        private final String sqlText;
+        private final long fragId;
+
+        @SuppressWarnings("deprecation")
+        FragIdAndText(String stmtName) {
+            Statement stmt = m_testProc.getStatements().getIgnoreCase(stmtName);
+            PlanFragment frag = null;
+            for (PlanFragment f : stmt.getFragments()) {
+                frag = f;
+            }
+
+            fragId = CatalogUtil.getUniqueIdForFragment(frag);
+            sqlText = stmt.getSqltext();
+
+            ActivePlanRepository.addFragmentForTest(
+                    fragId,
+                    Encoder.decodeBase64AndDecompressToBytes(frag.getPlannodetree()),
+                    sqlText);
+        }
+
+        long id() { return fragId; }
+        String text() { return sqlText; }
+    }
+
+    /**
+     * Build a set of inputs for the EE to execute a group of
+     * fragments.  Uses the sizes of arrays to determine how many
+     * fragments to run.  The first fragments will be quick, and
+     * should not trigger a log message; the last one is specified by
+     * its SQL statement name.
+     * @param lastStmtName   Stmt whose fragment should be executed last
+     * @param fragIds        Fragment IDs, populated by this method
+     * @param paramSets      Param sets, populated by this method
+     * @param sqlTexts       Statement text for fragments, populated by this method
+     */
+    private void createExecutionEngineInputs(
+            String lastStmtName,
+            long[] fragIds,
+            ParameterSet[] paramSets,
+            String[] sqlTexts) {
+
+        ActivePlanRepository.clear();
+
+        int numQuickFrags = fragIds.length - 1;
+        FragIdAndText quickFragIdAndText = new FragIdAndText("quick_query");
+        for (int i = 0; i < numQuickFrags; ++i) {
+            fragIds[i] = quickFragIdAndText.id();
+            paramSets[i] = ParameterSet.emptyParameterSet();
+            sqlTexts[i] = quickFragIdAndText.text();
+        }
+
+        FragIdAndText lastFragIdAndText = new FragIdAndText(lastStmtName);
+        fragIds[numQuickFrags] = lastFragIdAndText.id();
+        paramSets[numQuickFrags] = ParameterSet.emptyParameterSet();
+        sqlTexts[numQuickFrags] = lastFragIdAndText.text();
+    }
+
+    /**
+     * This method inserts a bunch of rows into table Items,
+     * and executes a set of fragments in the EE.
+     * @param numRowsToInsert     how many rows to insert into Items
+     * @param timeout             number of ms to wait before canceling RO fragments
+     * @param stmtName            SQL stmt name for last fragment to execute
+     * @param numFragsToExecute   Total number of frags to execute
+     *                            (if greater than 1, will prepend quick-running fragments)
+     * @param readOnly            Identify the set of fragments as read-only (may timeout)
+     * @param sqlTextExpectation  Behavior to expect when verify SQL text in log message
+     */
+    @SuppressWarnings("deprecation")
+    private void verifyLongRunningQueries(
+            int numRowsToInsert,
+            int timeout,
+            String stmtName,
+            int numFragsToExecute,
+            boolean readOnly,
+            SqlTextExpectation sqlTextExpectation) {
 
         m_ee.loadCatalog( 0, m_catalog.serialize());
 
         m_itemData.clearRowData();
-        for (int i = 0; i < m_tableSize; ++i) {
+        for (int i = 0; i < numRowsToInsert; ++i) {
             m_itemData.addRow(i, i + 50, "item" + i, (double)i / 2, "data" + i);
         }
 
-        m_ee.loadTable(ITEM_TABLEID, m_itemData, 0, 0, 0, false, false, WRITE_TOKEN);
-        assertEquals(m_tableSize, m_ee.serializeTable(ITEM_TABLEID).getRowCount());
+        m_ee.loadTable(ITEM_TABLEID, m_itemData, 0, 0, 0, 0, false, false, WRITE_TOKEN);
+        assertEquals(numRowsToInsert, m_ee.serializeTable(ITEM_TABLEID).getRowCount());
         System.out.println("Rows loaded to table " + m_ee.serializeTable(ITEM_TABLEID).getRowCount());
 
-        Statement queryStmt = m_testProc.getStatements().getIgnoreCase(query);
-        String sqlText = queryStmt.getSqltext();
-
-        PlanFragment frag = null;
-        for (PlanFragment f : queryStmt.getFragments()) {
-            frag = f;
-        }
-
-        // populate plan cache
-        ActivePlanRepository.clear();
-        ActivePlanRepository.addFragmentForTest(
-                CatalogUtil.getUniqueIdForFragment(frag),
-                Encoder.decodeBase64AndDecompressToBytes(frag.getPlannodetree()),
-                sqlText);
-        ParameterSet params = ParameterSet.emptyParameterSet();
+        long[] fragIds = new long[numFragsToExecute];
+        ParameterSet[] paramSets = new ParameterSet[numFragsToExecute];
+        String[] sqlTexts = new String[numFragsToExecute];
+        createExecutionEngineInputs(stmtName, fragIds, paramSets, sqlTexts);
 
         // Replace the normal logger with a mocked one, so we can verify the message
         VoltLogger mockedLogger = Mockito.mock(VoltLogger.class);
         ExecutionEngine.setVoltLoggerForTest(mockedLogger);
 
-        m_ee.setTimeoutLatency(timeout);
+        try (AutoEngineSettings aes = new AutoEngineSettings()) {
+            // Set the log duration to be short to ensure that a message will be logged
+            // for long-running queries
+            aes.setInitialLogDuration(1);
+            aes.setTimeoutLatency(timeout);
 
-        try {
+            // NOTE: callers of this method specify something other than SQL_STATEMENT
+            // in order to prove that we don't crash if the sqlTexts array passed to
+            // (Java class) ExecutionEngine is malformed.
+            //
+            // This issue was related to ENG-7610, which took down the EE.  It has since
+            // been fixed, so (we hope) nothing like this will happen in the wild.
+            switch (sqlTextExpectation) {
+            case SQL_STATEMENT:
+                // leave sqlTexts AS-IS
+                break;
+            case NO_STATEMENT:
+                sqlTexts = null;
+                break;
+            case STATEMENT_LIST:
+                // Leave off the last item, which is the one that needs to be
+                // reported.
+                sqlTexts = Arrays.copyOfRange(sqlTexts, 0, numFragsToExecute - 1);
+                break;
+            default:
+                fail("Invalid value for sqlTextExpectation");
+            }
+
             m_ee.executePlanFragments(
-                    1,
-                    new long[] { CatalogUtil.getUniqueIdForFragment(frag) },
+                    numFragsToExecute,
+                    fragIds,
                     null,
-                    new ParameterSet[] { params },
-                    new String[] { sqlText },
+                    paramSets,
+                    sqlTexts,
                     3, 3, 2, 42,
                     readOnly ? READ_ONLY_TOKEN : WRITE_TOKEN);
             if (readOnly && timeout > 0) {
@@ -315,14 +476,48 @@ public class TestFragmentProgressUpdate extends TestCase {
                 fail();
             }
         } catch (Exception ex) {
-            String msg = String.format("A SQL query was terminated after %.2f seconds "
+            String msg = String.format("A SQL query was terminated after %.03f seconds "
                     + "because it exceeded the query timeout period.",
                     timeout/1000.0);
             assertEquals(msg, ex.getMessage());
         }
 
-        verify(mockedLogger, atLeastOnce()).info(contains(
-            String.format("Executing SQL statement is \"%s\".", sqlText)));
+        String expectedSqlTextMsg = null;
+        switch (sqlTextExpectation) {
+        case SQL_STATEMENT:
+            String sqlText = sqlTexts[numFragsToExecute - 1];
+            expectedSqlTextMsg = String.format("Executing SQL statement is \"%s\".", sqlText);
+            break;
+        case NO_STATEMENT:
+            expectedSqlTextMsg = "SQL statement text is not available.";
+            break;
+        case STATEMENT_LIST:
+            expectedSqlTextMsg = "Unable to report specific SQL statement text "
+                    + "for fragment task message index " + (numFragsToExecute - 1) + ".  "
+                    + "It MAY be one of these " + (numFragsToExecute - 1) + " items: "
+                    + "\"SELECT W_ID FROM WAREHOUSE LIMIT 1;\", ";
+            break;
+        default:
+            fail("Invalid value for sqlTextExpectation");
+        }
+
+        verify(mockedLogger, atLeastOnce()).info(contains(expectedSqlTextMsg));
+    }
+
+    /**
+     * A simpler version of verifyLongRunningQueries that executes just one
+     * fragment and assumes the SQL text will be correctly displayed.
+     * @param numRowsToInsert     how many rows to insert into Items
+     * @param timeout             number of ms to wait before canceling RO fragments
+     * @param stmtName            SQL stmt name for last fragment to execute
+     * @param readOnly            Identify the set of fragments as read-only (may timeout)
+     */
+    private void verifyLongRunningQueries(
+            int numRowsToInsert,
+            int timeout,
+            String stmtName,
+            boolean readOnly) {
+        verifyLongRunningQueries(numRowsToInsert, timeout, stmtName, 1, readOnly, SqlTextExpectation.SQL_STATEMENT);
     }
 
     public void testTimingoutQueries() throws Exception {
@@ -340,26 +535,18 @@ public class TestFragmentProgressUpdate extends TestCase {
         verifyLongRunningQueries(300, 0, procName, true);
         tearDown(); setUp();
 
-
         //
         // Write query (negative)
         //
         procName = "item_big_del";
-        m_ee.setInitialLogDurationForTest(1);
-
         verifyLongRunningQueries(50000, 0, procName, false);
         tearDown(); setUp();
-        m_ee.setInitialLogDurationForTest(1);
 
         verifyLongRunningQueries(50000, 100, procName, false);
         tearDown(); setUp();
     }
 
     private ExecutionEngine m_ee;
-    private static final int CLUSTER_ID = 2;
-    private static final long NODE_ID = 1;
-    private int m_tableSize;
-    private int m_longOpthreshold;
     private VoltTable m_warehousedata;
     private VoltTable m_itemData;
     private Catalog m_catalog;
@@ -369,6 +556,9 @@ public class TestFragmentProgressUpdate extends TestCase {
 
     @Override
     protected void setUp() throws Exception {
+        final int CLUSTER_ID = 2;
+        final long NODE_ID = 1;
+
         super.setUp();
         VoltDB.instance().readBuildInfo("Test");
         m_warehousedata = new VoltTable(
@@ -404,11 +594,12 @@ public class TestFragmentProgressUpdate extends TestCase {
                 0,
                 0,
                 "",
+                0,
                 100,
                 new HashinatorConfig(HashinatorType.LEGACY,
                                      LegacyHashinator.getConfigureBytes(1),
                                      0,
-                                     0));
+                                     0), false);
     }
 
     @Override

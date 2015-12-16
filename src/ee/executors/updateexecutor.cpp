@@ -143,11 +143,13 @@ bool UpdateExecutor::p_execute(const NValueArray &params) {
     // determine which indices are updated by this executor
     // iterate through all target table indices and see if they contain
     // columns mutated by this executor
+    //
+    // Shouldn't this be done in p_init?  See ticket ENG-8668.
     std::vector<TableIndex*> indexesToUpdate;
     const std::vector<TableIndex*>& allIndexes = targetTable->allIndexes();
     BOOST_FOREACH(TableIndex *index, allIndexes) {
         bool indexKeyUpdated = false;
-        BOOST_FOREACH(int colIndex, index->getColumnIndices()) {
+        BOOST_FOREACH(int colIndex, index->getAllColumnIndices()) {
             std::pair<int, int> updateColInfo; // needs to be here because of macro failure
             BOOST_FOREACH(updateColInfo, m_inputTargetMap) {
                 if (updateColInfo.second == colIndex) {

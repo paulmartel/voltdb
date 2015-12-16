@@ -22,7 +22,7 @@ CREATE TABLE VarLength (
 );
 
 CREATE TABLE P1 (
-  ID INTEGER DEFAULT '0' NOT NULL,
+  ID INTEGER DEFAULT 0 NOT NULL,
   DESC VARCHAR(300),
   NUM INTEGER,
   RATIO FLOAT,
@@ -31,15 +31,17 @@ CREATE TABLE P1 (
 PARTITION TABLE P1 ON COLUMN ID;
 
 CREATE TABLE R1 (
-  ID INTEGER DEFAULT '0' NOT NULL,
+  ID INTEGER DEFAULT 0 NOT NULL,
   DESC VARCHAR(300),
   NUM INTEGER,
   RATIO FLOAT,
   PRIMARY KEY (ID)
 );
+CREATE PROCEDURE R1_PROC1 AS SELECT NUM + 0.1 FROM R1;
+CREATE PROCEDURE R1_PROC2 AS SELECT NUM + 1.0E-1 FROM R1;
 
 CREATE TABLE P2 (
-  ID INTEGER DEFAULT '0' NOT NULL,
+  ID INTEGER DEFAULT 0 NOT NULL,
   DESC VARCHAR(300),
   NUM INTEGER NOT NULL,
   RATIO FLOAT NOT NULL,
@@ -48,15 +50,28 @@ CREATE TABLE P2 (
 PARTITION TABLE P2 ON COLUMN ID;
 
 CREATE TABLE R2 (
-  ID INTEGER DEFAULT '0' NOT NULL,
+  ID INTEGER DEFAULT 0 NOT NULL,
   DESC VARCHAR(300),
   NUM INTEGER NOT NULL,
   RATIO FLOAT NOT NULL,
   CONSTRAINT R2_PK_TREE PRIMARY KEY (ID)
 );
 
+CREATE TABLE R3 (
+  ID INTEGER DEFAULT 0 NOT NULL,
+  NUM INTEGER
+);
+create index idx1 on R3 (id);
+create unique index idx2 on R3 (id,num);
+
+-- not suppose to define index on this table
+CREATE TABLE R4 (
+  ID INTEGER DEFAULT 0 NOT NULL,
+  NUM INTEGER
+);
+
 CREATE TABLE P1_DECIMAL (
-  ID INTEGER DEFAULT '0' NOT NULL,
+  ID INTEGER DEFAULT 0 NOT NULL,
   CASH DECIMAL NOT NULL,
   CREDIT DECIMAL NOT NULL,
   RATIO FLOAT NOT NULL,
@@ -64,7 +79,7 @@ CREATE TABLE P1_DECIMAL (
 );
 
 CREATE TABLE R1_DECIMAL (
-  ID INTEGER DEFAULT '0' NOT NULL,
+  ID INTEGER DEFAULT 0 NOT NULL,
   CASH DECIMAL NOT NULL,
   CREDIT DECIMAL NOT NULL,
   RATIO FLOAT NOT NULL,
@@ -73,8 +88,8 @@ CREATE TABLE R1_DECIMAL (
 
 CREATE TABLE COUNT_NULL (
   TRICKY TINYINT,
-  ID INTEGER DEFAULT '0' NOT NULL,
-  NUM INTEGER DEFAULT '0' NOT NULL,
+  ID INTEGER DEFAULT 0 NOT NULL,
+  NUM INTEGER DEFAULT 0 NOT NULL,
   PRIMARY KEY (ID)
 );
 
@@ -254,3 +269,123 @@ FROM transaction
 GROUP BY acc_no, vendor_id;
 -- End tables for ENG-7041   --
 -- ************************* --
+
+-- ************************* --
+-- Table for ENG-7349        --
+create table sm_idx_tbl(
+       ti1 tinyint,
+       ti2 tinyint,
+       bi bigint
+);
+create index sm_idx on sm_idx_tbl(ti1, ti2);
+-- End table for ENG-7349    --
+-- ************************* --
+
+-- ****************************** --
+-- Stored procedures for ENG-7354 --
+create procedure one_list_param as
+       select id from P1 where ID in ?
+       order by id;
+
+create procedure one_string_list_param as
+       select id from P1 where desc in ?
+       order by id;
+
+create procedure one_scalar_param as
+       select id from P1 where ID in (?)
+       order by id;
+
+create procedure one_string_scalar_param as
+       select id from P1 where desc in (?)
+       order by id;
+-- End stored procedures for ENG-7354 --
+-- ********************************** --
+
+-- ********************************** --
+-- Stored procedure for ENG-7724      --
+CREATE TABLE product_changes (
+  location              VARCHAR(12) NOT NULL,
+  product_id               VARCHAR(18) NOT NULL,
+  start_date               TIMESTAMP,
+  safety_time_promo        SMALLINT,
+  safety_time_base         SMALLINT,
+  POQ                      SMALLINT,
+  case_size                INTEGER,
+  multiple                 INTEGER,
+  lead_time                SMALLINT,
+  supplier                 VARCHAR(12),
+  facings                  INTEGER,
+  minimum_deep             FLOAT,
+  maximum_deep             INTEGER,
+  backroom_sfty_stck       INTEGER,
+  cost                     FLOAT,
+  selling_price            FLOAT,
+  model                    VARCHAR(12),
+  assortment_adj           FLOAT,
+  safety_stock_days        SMALLINT
+);
+PARTITION TABLE product_changes ON COLUMN location;
+CREATE INDEX product_changes_sku ON product_changes (location, product_id);
+
+
+CREATE PROCEDURE voltdbSelectProductChanges AS
+SELECT
+  location,
+  product_id,
+  start_date,
+  facings,
+  minimum_deep,
+  maximum_deep,
+  backroom_sfty_stck,
+  supplier,
+  safety_time_base,
+  selling_price,
+  cost,
+  supplier,
+  safety_stock_days
+FROM product_changes
+WHERE location = ?
+AND product_id = ?
+ORDER by location, product_id, start_date;
+PARTITION PROCEDURE voltdbSelectProductChanges ON TABLE product_changes COLUMN location PARAMETER 0;
+-- ********************************** --
+
+-- ENG-9032, ENG-9389
+CREATE TABLE t1(
+ a INTEGER,
+ b integer);
+create index t1_idx1 on t1 (a);
+create index t1_idx2 on t1 (b);
+
+CREATE TABLE t2(
+ b INTEGER,
+ d integer);
+create unique index t2_idx1 on t2 (b);
+
+CREATE TABLE t3(
+ a INTEGER,
+ x INTEGER,
+ d integer);
+create unique index t3_idx1 on t3 (a);
+create unique index t3_idx2 on t3 (d);
+
+CREATE TABLE t3_no_index (
+ a INTEGER,
+ x INTEGER,
+ d integer);
+
+-- ENG-9533
+CREATE TABLE test1_eng_9533 (
+  id bigint not null,
+  primary key (id)
+);
+PARTITION TABLE test1_eng_9533 ON COLUMN ID;
+
+CREATE TABLE test2_eng_9533 (
+   T_ID bigint NOT NULL,
+   T_CHAR_ID1 varchar(128),
+   T_CHAR_ID2 varchar(128),
+   T_INT integer,
+   PRIMARY KEY (T_ID, T_CHAR_ID1, T_CHAR_ID2)
+);
+PARTITION TABLE test2_eng_9533 ON COLUMN T_ID;

@@ -116,8 +116,10 @@ public class ExecutionEngineJNI extends ExecutionEngine {
             final int partitionId,
             final int hostId,
             final String hostname,
+            final int drClusterId,
             final int tempTableMemory,
-            final HashinatorConfig hashinatorConfig)
+            final HashinatorConfig hashinatorConfig,
+            final boolean createDrReplicatedStream)
     {
         // base class loads the volt shared library.
         super(siteId, partitionId);
@@ -141,7 +143,9 @@ public class ExecutionEngineJNI extends ExecutionEngine {
                     partitionId,
                     hostId,
                     getStringBytes(hostname),
+                    drClusterId,
                     tempTableMemory * 1024 * 1024,
+                    createDrReplicatedStream,
                     EE_COMPACTION_THRESHOLD);
         checkErrorCode(errorCode);
 
@@ -250,8 +254,10 @@ public class ExecutionEngineJNI extends ExecutionEngine {
             final long[] inputDepIds,
             final Object[] parameterSets,
             final long txnId,
-            final long spHandle, final long lastCommittedSpHandle,
-            long uniqueId, final long undoToken) throws EEException
+            final long spHandle,
+            final long lastCommittedSpHandle,
+            long uniqueId,
+            final long undoToken) throws EEException
     {
         // plan frag zero is invalid
         assert((numFragmentIds == 0) || (planFragmentIds[0] != 0));
@@ -367,7 +373,11 @@ public class ExecutionEngineJNI extends ExecutionEngine {
 
     @Override
     public byte[] loadTable(final int tableId, final VoltTable table, final long txnId,
-        final long spHandle, final long lastCommittedSpHandle, boolean returnUniqueViolations, boolean shouldDRStream,
+        final long spHandle,
+        final long lastCommittedSpHandle,
+        final long uniqueId,
+        boolean returnUniqueViolations,
+        boolean shouldDRStream,
         long undoToken) throws EEException
     {
         if (HOST_TRACE_ENABLED) {
@@ -380,9 +390,9 @@ public class ExecutionEngineJNI extends ExecutionEngine {
 
         //Clear is destructive, do it before the native call
         deserializer.clear();
-        final int errorCode = nativeLoadTable(pointer, tableId, serialized_table, txnId,
-                                              spHandle, lastCommittedSpHandle, returnUniqueViolations, shouldDRStream,
-                                              undoToken);
+        final int errorCode = nativeLoadTable(pointer, tableId, serialized_table,
+                                              txnId, spHandle, lastCommittedSpHandle, uniqueId,
+                                              returnUniqueViolations, shouldDRStream, undoToken);
         checkErrorCode(errorCode);
 
         try {
@@ -459,7 +469,6 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     @Override
     public void toggleProfiler(final int toggle) {
         nativeToggleProfiler(pointer, toggle);
-        return;
     }
 
     @Override
@@ -480,7 +489,7 @@ public class ExecutionEngineJNI extends ExecutionEngine {
      */
     @Override
     public boolean setLogLevels(final long logLevels) throws EEException {
-        return nativeSetLogLevels( pointer, logLevels);
+        return nativeSetLogLevels(pointer, logLevels);
     }
 
     @Override
@@ -555,7 +564,7 @@ public class ExecutionEngineJNI extends ExecutionEngine {
 
     @Override
     public long tableHashCode(int tableId) {
-        return nativeTableHashCode( pointer, tableId);
+        return nativeTableHashCode(pointer, tableId);
     }
 
     @Override
@@ -595,6 +604,17 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     }
 
     @Override
+    public long applyBinaryLog(ByteBuffer log, long txnId, long spHandle, long lastCommittedSpHandle, long uniqueId,
+                               int remoteClusterId, long undoToken) throws EEException
+    {
+        long rowCount = nativeApplyBinaryLog(pointer, txnId, spHandle, lastCommittedSpHandle, uniqueId, remoteClusterId, undoToken);
+        if (rowCount < 0) {
+            throwExceptionForError((int)rowCount);
+        }
+        return rowCount;
+    }
+
+    @Override
     public long getThreadLocalPoolAllocations() {
         return nativeGetThreadLocalPoolAllocations();
     }
@@ -610,20 +630,19 @@ public class ExecutionEngineJNI extends ExecutionEngine {
     }
 
     @Override
-    public byte[] executeTask(TaskType taskType, ByteBuffer task) {
-
-        byte retval[] = null;
+    public byte[] executeTask(TaskType taskType, ByteBuffer task) throws EEException {
         try {
             psetBuffer.putLong(0, taskType.taskId);
 
             //Clear is destructive, do it before the native call
             deserializer.clear();
-            nativeExecuteTask(pointer);
+            final int errorCode = nativeExecuteTask(pointer);
+            checkErrorCode(errorCode);
             return (byte[])deserializer.readArray(byte.class);
         } catch (IOException e) {
             Throwables.propagate(e);
         }
-        return retval;
+        return null;
     }
 
     @Override

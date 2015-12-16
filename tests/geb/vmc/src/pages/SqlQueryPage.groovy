@@ -23,8 +23,12 @@
 
 package vmcTest.pages
 
+import geb.error.RequiredPageContentNotPresent
 import geb.navigator.Navigator
 import geb.waiting.WaitTimeoutException
+
+import org.openqa.selenium.support.ui.Select
+import org.openqa.selenium.WebElement
 
 /**
  * This class represents the 'SQL Query' tab of the VoltDB Management Center
@@ -38,37 +42,78 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
         tablesTab   { tabControls.find("a[href='#tab1']") }
         viewsTab    { tabControls.find("a[href='#tab2']") }
         storedProcsTab  { tabControls.find("a[href='#tab3']") }
-        tablesNames { tabArea.find('#accordionTable').find('h3') }
-        viewsNames  { tabArea.find('#accordionViews').find('h3') }
-        storedProcs { tabArea.find('#accordionProcedures') }
+        listsArea   { tabArea.find('#tabScroller') }
+        tablesNames { listsArea.find('#accordionTable').find('h3') }
+        viewsNames  { listsArea.find('#accordionViews').find('h3') }
+        storedProcs { listsArea.find('#accordionProcedures') }
         systemStoredProcsHeader  { storedProcs.find('.systemHeader').first() }
-        defaultStoredProcsHeader { storedProcs.find('.systemHeader').last() }
+        defaultStoredProcsHeader { systemStoredProcsHeader.next('.systemHeader') }
+        userStoredProcsHeader    { storedProcs.find('.systemHeader').last() }
         systemStoredProcs   { storedProcs.find('#systemProcedure').find('h3') }
         defaultStoredProcs  { storedProcs.find('#defaultProcedure').find('h3') }
-        userStoredProcs { defaultStoredProcsHeader.nextAll('h3') }
+        userStoredProcs     { storedProcs.find('#userProcedure').find('h3') }
         allStoredProcs  { storedProcs.find('h3') }
 
         // Query elements
         queryInput  { $('#theQueryText') }
         runButton   { $('#runBTn') }
         clearButton { $('#clearQuery') }
-        queryResHtml { $('#resultHtml') }
-        queryTables  (required: false) { queryResHtml.find('table') }
-        queryErrHtml (required: false) { queryResHtml.find('span') }
-        queryDurHtml { $('#queryResults') }
+        qrFormatDropDown    { $('#exportType') }
+        qrfddOptions    { qrFormatDropDown.find('option') }
+        qrfddSelected   { qrFormatDropDown.find('option', selected: "selected") }
+        queryRes        { $('.queryResult') }
+        queryResHtml    { queryRes.find('#resultHtml') }
+        queryTables     (required: false) { queryResHtml.find('table') }
+        queryErrHtml    (required: false) { queryResHtml.find('.errorValue') }
+        queryDur        { $('#queryResults') }
+
+
+        //popup query ok and cancel
+        cancelpopupquery        { $("#btnQueryDatabasePausedErrorCancel", text:"Cancel")}
+        okpopupquery            { $("#btnQueryDatabasePausedErrorOk", text:"Ok")}
+        switchadminport         { $("#queryDatabasePausedInnerErrorPopup > div.overlay-contentError.errorQueryDbPause > p:nth-child(3) > span")}
+        queryexecutionerror     { $("#queryDatabasePausedInnerErrorPopup > div.overlay-title", text:"Query Execution Error")}
+        queryerrortxt           { $("#queryDatabasePausedInnerErrorPopup > div.overlay-contentError.errorQueryDbPause > p:nth-child(1)")}
+
+        htmltableresult 	    { $("#table_r0_html_0")}
+        createerrorresult	    { $("#resultHtml > span")}
+        htmlresultallcolumns	{ $("#table_r0_html_0 > thead")}
+
+        htmlresultselect	    { $("#table_r0_html_0 > thead > tr")}
+        refreshquery		    { $("#tabMain > button", text:"Refresh")}
+
+        //options
+        htmlOptions				{ $("option", text:"HTML") }
+        csvOptions				{ $("option", text:"CSV") }
+        monospaceOptions		{ $("option", text:"Monospace") }
+
+        // for view
+        checkview		{ $("#tabMain > ul > li.active > a")}
+
+        //result
+        resultHtml		{ $("#resultHtml") }
+        resultCsv		{ $("#resultCsv") }
+        resultMonospace	{ $("#resultMonospace") }
+
+        errorObjectNameAlreadyExist     { $("span", class:"errorValue") }
     }
     static at = {
         sqlQueryTab.displayed
         sqlQueryTab.attr('class') == 'active'
-        tabArea.displayed
+        tablesTab.displayed
+        viewsTab.displayed
         storedProcsTab.displayed
+        listsArea.displayed
         queryInput.displayed
-        queryResHtml.displayed
+        queryRes.displayed
+        queryDur.displayed
     }
+    boolean textHasChanged = false
 
     /**
      * Displays the list of Tables (by clicking the "Tables" tab).
      */
+
     def showTables() {
         clickToDisplay(tablesTab, tablesNames)
     }
@@ -76,6 +121,7 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
     /**
      * Displays the list of Views (by clicking the "Views" tab).
      */
+
     def showViews() {
         clickToDisplay(viewsTab, viewsNames)
     }
@@ -83,6 +129,7 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
     /**
      * Displays the list of Stored Procedures (by clicking the "Stored Procedures" tab).
      */
+
     def showStoredProcedures() {
         clickToDisplay(storedProcsTab, allStoredProcs)
     }
@@ -118,6 +165,37 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
     }
 
     /**
+     * Given two Navigators, for a specific category of Stored Procedures
+     * (System, Default or User), returns the list of that category of Stored
+     * Procedures (as displayed on the "Stored Procedures" tab, under the
+     * specified heading).<p>
+     * Note: as a side effect, the "Stored Procedures" tab is opened (if
+     * needed), and the specfied list of Stored Procedures  is opened (if
+     * needed), and then closed.
+     * @param storedProcsHeaderNav - a Navigator specifiying the header for
+     * the desired category (System, Default or User) of Stored Procedures.
+     * @param storedProcsNav - a Navigator specifiying each of the Stored
+     * Procedures the desired category (System, Default or User).
+     * @return the list of Default Stored Procedure names.
+     */
+    private List<String> getSpecifiedStoredProcedures(Navigator storedProcsHeaderNav,
+                                                      Navigator storedProcsNav) {
+        def storedProcs = []
+        try {
+            showStoredProcedures()
+            clickToDisplay(storedProcsHeaderNav, storedProcsNav)
+            storedProcsNav.each {
+                scrollIntoView(it)
+                storedProcs.add(it.text())
+            }
+            clickToNotDisplay(storedProcsHeaderNav, storedProcsNav)
+        } catch (RequiredPageContentNotPresent e) {
+            // do nothing: empty list will be returned
+        }
+        return storedProcs
+    }
+
+    /**
      * Returns the list of System Stored Procedures (as displayed on the
      * "Stored Procedures" tab, under the "System Stored Procedures" heading).<p>
      * Note: as a side effect, the "Stored Procedures" tab is opened (if
@@ -126,15 +204,7 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
      * @return the list of System Stored Procedure names.
      */
     def List<String> getSystemStoredProcedures() {
-        def storedProcs = []
-        showStoredProcedures()
-        clickToDisplay(systemStoredProcsHeader, systemStoredProcs)
-        systemStoredProcs.each {
-            scrollIntoView(it);
-            storedProcs.add(it.text())
-        }
-        clickToNotDisplay(systemStoredProcsHeader, systemStoredProcs)
-        return storedProcs
+        return getSpecifiedStoredProcedures(systemStoredProcsHeader, systemStoredProcs)
     }
 
     /**
@@ -146,15 +216,7 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
      * @return the list of Default Stored Procedure names.
      */
     def List<String> getDefaultStoredProcedures() { // defaultStoredProcsHeader
-        def storedProcs = []
-        showStoredProcedures()
-        clickToDisplay(defaultStoredProcsHeader, defaultStoredProcs)
-        defaultStoredProcs.each {
-            scrollIntoView(it);
-            storedProcs.add(it.text())
-        }
-        clickToNotDisplay(defaultStoredProcsHeader, defaultStoredProcs)
-        return storedProcs
+        return getSpecifiedStoredProcedures(defaultStoredProcsHeader, defaultStoredProcs)
     }
 
     /**
@@ -167,10 +229,16 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
      */
     def List<String> getUserStoredProcedures() {
         def storedProcs = []
-        showStoredProcedures()
-        userStoredProcs.each {
-            scrollIntoView(it);
-            storedProcs.add(it.text())
+        try {
+            showStoredProcedures()
+            clickToDisplay(userStoredProcsHeader, userStoredProcs)
+            userStoredProcs.each {
+                scrollIntoView(it)
+                storedProcs.add(it.text())
+            }
+            clickToNotDisplay(userStoredProcsHeader, userStoredProcs)
+        } catch (RequiredPageContentNotPresent e) {
+            // do nothing: empty list will be returned
         }
         return storedProcs
     }
@@ -339,26 +407,51 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
     }
 
     /**
+     * Returns true if the text of the query duration element has changed to a
+     * different value - even if it subsequently changed back to the same value.
+     * @param navDurElem - a Navigator specifying the query duration element
+     * to be checked for having changed.
+     * @param initDurText - the original text of the query duration element,
+     * before running a new query.
+     * @return true if the query duration text has changed.
+     */
+    private boolean hasChanged(Navigator navDurElem, String initDurText) {
+        if (textHasChanged) {
+            return true
+        }
+        if (navDurElem.text() != initDurText ) {
+            textHasChanged = true
+         }
+        return textHasChanged
+    }
+
+    /**
      * Runs whatever query is currently listed in the Query text
      * (by clicking the "Run" button).
      */
     def runQuery() {
-        String initQueryResultText = queryResHtml.text()
-        String initQueryDurationText = queryDurHtml.text()
+        String initQueryDurationText = queryDur.text()
         runButton.click()
-        // TODO: improve this wait, so that it waits for the old element(s) to
-        // become "stale", rather than relying on the text to change (which it
-        // sometimes does not, which is why we have to catch a WaitTimeoutException
+
+        // Wait for both the query result and duration to be displayed, with
+        // (non-null) non-empty text; and for the latter to have changed
         try {
+            textHasChanged = false
             waitFor() {
-                queryResHtml.text() != null && !queryResHtml.text().isEmpty() && 
-                queryDurHtml.text() != null && !queryDurHtml.text().isEmpty() && 
-                (queryResHtml.text() != initQueryResultText || queryDurHtml.text() != initQueryDurationText)
+                hasChanged(queryDur, initQueryDurationText) &&
+                isDisplayed(queryRes) && queryRes.text() != null && !queryRes.text().isEmpty() &&
+                isDisplayed(queryDur) && queryDur.text() != null && !queryDur.text().isEmpty()
             }
         } catch (WaitTimeoutException e) {
-            println "\nIn SqlQueryPage.runQuery(), caught WaitTimeoutException; see standard error for stack trace."
+            String message = '\nIn SqlQueryPage.runQuery(), caught WaitTimeoutException; this is probably nothing to worry about'
+            println message + '.'
+            println 'See Standard error for stack trace.'
+            println 'Previous Duration text: ' + initQueryDurationText
+            println 'Current  Duration text: ' + queryDur.text()
+            println 'Duration text changed : ' + hasChanged(queryDur, initQueryDurationText)
+            println 'Current  Result   text:\n' + queryRes.text()
+            System.err.println message + ':'
             e.printStackTrace()
-            println "This is probably nothing to worry about.\n"
         }
         return this
     }
@@ -374,23 +467,42 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
     }
 
     /**
-     * Returns the contents of the element specified by Navigator, which must
-     * be a "table" HTML element, in the form of a Map, with each element a
-     * List of Strings; each Key of the Map is a column header of the table,
-     * and its List contains the displayed text of that column.
-     * @param tableElement - a Navigator specifying the "table" element whose
-     * contents are to be returned.
-     * @return a Map representing the contents of the specified table element.
+     * Returns a list of (the text of) the options available on query result
+     * format drop-down menu. (Typically, these are "HTML", "CSV" and
+     * "Monospace".)
      */
-    private def Map<String,List<String>> getTableResult(Navigator tableElement) {
-        def result = [:]
-        def columnHeaders = tableElement.find('thead').find('th')*.text()
-        columnHeaders = columnHeaders.collect {it.toLowerCase()}
-        def rows = tableElement.find('tbody').find('tr')
-        def colNum = 0
-        def makeColumn = { index,rowset -> rowset.collect { row -> row.find('td',index).text() } }
-        columnHeaders.each { result.put(it, makeColumn(colNum++, rows)) }
-        return result
+    def List<String> getQueryResultFormatOptions() {
+        List<String> options = []
+        qrfddOptions.each { options.add(it.text()) }
+        return options
+    }
+
+    /**
+     * Returns a list of the values of the options available on query result
+     * format drop-down menu. (Typically, these are the same as the text
+     * values, i.e., normally "HTML", "CSV" and "Monospace".)
+     */
+    def List<String> getQueryResultFormatOptionValues() {
+        List<String> values = []
+        qrfddOptions.each { values.add(it.value()) }
+        return values
+    }
+
+    /**
+     * Returns the value of the currently selected option of the query result
+     * format drop-down menu. (Typically, "HTML", "CSV" or "Monospace".)
+     */
+    def String getSelectedQueryResultFormat() {
+        return qrFormatDropDown.value()
+    }
+
+    /**
+     * Sets the query result format drop-down menu to the specified value.
+     * @param format - the value to which the menu should be set (typically
+     * "HTML", "CSV" or "Monospace").
+     */
+    def selectQueryResultFormat(String format) {
+        qrFormatDropDown.value(format)
     }
 
     /**
@@ -398,11 +510,14 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
      * in the form of a List (for each table) of Maps, with each Map element a
      * List of Strings; each Key of the Map is a column header of the table,
      * and its List contains the displayed text of that column.
+     * @param colHeaderFormat - the case in which you want each table's column
+     * headers returned: converted to lower case, to upper case, or as-is.
      * @return a List of Maps representing the contents of every table.
      */
-    def List<Map<String,List<String>>> getQueryResults() {
+    def List<Map<String,List<String>>> getQueryResults(
+            ColumnHeaderCase colHeaderFormat=ColumnHeaderCase.TO_LOWER_CASE) {
         def results = []
-        queryTables.each { results.add(getTableResult(it)) }
+        queryTables.each { results.add(getTableByColumn(it, colHeaderFormat)) }
         return results
     }
 
@@ -414,10 +529,13 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
      * this method with index 0 will return the first table.
      * @param index - the index (0-based) of the "table" element whose contents
      * are to be returned.
+     * @param colHeaderFormat - the case in which you want the table's column
+     * headers returned: converted to lower case, to upper case, or as-is.
      * @return a Map representing the contents of the specified table.
      */
-    def Map<String,List<String>> getQueryResult(int index) {
-        return getQueryResults().get(index)
+    def Map<String,List<String>> getQueryResult(int index,
+                                                ColumnHeaderCase colHeaderFormat=ColumnHeaderCase.TO_LOWER_CASE) {
+        return getQueryResults(colHeaderFormat).get(index)
     }
 
     /**
@@ -425,10 +543,24 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
      * Result" area, in the form of a Map, with each element a List of Strings;
      * each Key of the Map is a column header of the table, and its List
      * contains the displayed text of that column.
+     * @param colHeaderFormat - the case in which you want the table's column
+     * headers returned: converted to lower case, to upper case, or as-is.
      * @return a Map representing the contents of the <i>last</i> table.
      */
-    def Map<String,List<String>> getQueryResult() {
-        return getTableResult(queryTables.last())
+    def Map<String,List<String>> getQueryResult(
+            ColumnHeaderCase colHeaderFormat=ColumnHeaderCase.TO_LOWER_CASE) {
+        return getTableByColumn(queryTables.last(), colHeaderFormat)
+    }
+
+    /**
+     * Returns the text of whatever is shown in the "Query Result" area, in its
+     * entirety; normally, this would include query results and/or errors, but
+     * at times it could also be "Connect to a datasource first.", which would
+     * not show up as either a result nor an error message.
+     * @return the text of whatever is shown in the "Query Result" area.
+     */
+    def String getQueryResultText() {
+        return queryRes.text()
     }
 
     /**
@@ -446,6 +578,134 @@ class SqlQueryPage extends VoltDBManagementCenterPage {
      * @return the text of any "Query Duration" message; or null.
      */
     def String getQueryDuration() {
-        return queryDurHtml.text()
+        return queryDur.text()
+    }
+
+    /*
+	 * click DbMonitor tab to go to Db Monitor
+	 */
+    def boolean gotoDbMonitor() {
+        header.tabDBMonitor.click()
+    }
+
+    /*
+     * click DbMonitor tab to go to Db Monitor
+     */
+    def boolean gotoSchema() {
+        header.tabSchema.click()
+    }
+
+    /*
+     * get query to create a table
+     */
+    def String getQueryToCreateTable() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/sqlQueryDbMonitor.txt"));
+        String line;
+        String query = ""
+
+        while((line = br.readLine()) != "#create") {
+        }
+
+        while ((line = br.readLine()) != "#delete") {
+            // process the line.
+            query = query + line + "\n"
+        }
+
+        return query
+    }
+
+    /*
+	 *	Get delete query
+	 */
+    def String getQueryToDeleteTable() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/sqlQueryDbMonitor.txt"));
+        String line;
+        String query = ""
+
+        while((line = br.readLine()) != "#delete") {
+        }
+
+        while ((line = br.readLine()) != "#name") {
+            // process the line.
+            query = query + line + "\n"
+        }
+
+        return query
+    }
+
+    /*
+     * get tablename that is created and deleted
+     */
+    def String getTablename() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/sqlQueryDbMonitor.txt"));
+        String line;
+        String query = ""
+
+        while((line = br.readLine()) != "#name") {
+        }
+
+        while ((line = br.readLine()) != null) {
+            query = query + line + "\n"
+        }
+
+        return query
+    }
+
+    //for view
+
+    /*
+     * get query to create a view
+     */
+    def String getQueryToCreateView() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/viewtable.txt"));
+        String line;
+        String query = ""
+
+        while((line = br.readLine()) != "#create") {
+        }
+
+        while ((line = br.readLine()) != "#delete") {
+            // process the line.
+            query = query + line + "\n"
+        }
+
+        return query
+    }
+
+    /*
+	 *	Get delete query
+	 */
+    def String getQueryToDeleteView() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/viewtable.txt"));
+        String line;
+        String query = ""
+
+        while((line = br.readLine()) != "#delete") {
+        }
+
+        while ((line = br.readLine()) != "#name") {
+            // process the line.
+            query = query + line + "\n"
+        }
+
+        return query
+    }
+
+    /*
+     * get viewname that is created and deleted
+     */
+    def String getViewname() {
+        BufferedReader br = new BufferedReader(new FileReader("src/resources/viewtable.txt"));
+        String line;
+        String query = ""
+
+        while((line = br.readLine()) != "#name") {
+        }
+
+        while ((line = br.readLine()) != null) {
+            query = query + line + "\n"
+        }
+
+        return query
     }
 }

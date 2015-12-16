@@ -22,7 +22,7 @@
 
 {@jointype = "_jointype"}
 
-INSERT INTO @dmltable VALUES (_id, _value[int16], _value[int16], _value[int16 null20], _value[int16])
+INSERT INTO @dmltable VALUES (_id, _value[byte], _value[byte], _value[byte null20], _value[byte])
 INSERT INTO @dmltable VALUES (_id, 1010, 1010, 1010, 1010)
 INSERT INTO @dmltable VALUES (_id, 1020, 1020, 1020, 1020)
 
@@ -65,7 +65,9 @@ SELECT @idcol, @numcol FROM @fromtables LHS39 @jointype JOIN @fromtables RHS USI
 
 
 --- Three or more table outer join test
-SELECT * FROM @fromtables LHS40 @jointype JOIN @fromtables MHS ON  LHS40.@idcol = MHS.@idcol  @jointype JOIN @fromtables RHS ON LHS40.@numcol = RHS.@numcol
-SELECT @idcol, @numcol FROM @fromtables LHS40 @jointype JOIN @fromtables MHS ON  LHS40.@idcol = MHS.@idcol  @jointype JOIN @fromtables RHS ON LHS40.@numcol = RHS.@numcol
+SELECT       *                     FROM @fromtables LHS40 @jointype JOIN @fromtables MHS ON  LHS40.@idcol = MHS.@idcol  @jointype JOIN @fromtables RHS ON LHS40.@numcol = RHS.@numcol
+SELECT LHS41.@idcol, LHS41.@numcol FROM @fromtables LHS41 @jointype JOIN @fromtables MHS ON  LHS41.@idcol = MHS.@idcol  @jointype JOIN @fromtables RHS ON LHS41.@numcol = RHS.@numcol
+-- Uncomment after ENG-9367 is fixed (??):
+--SELECT       @idcol,       @numcol FROM @fromtables LHS42 @jointype JOIN @fromtables MHS ON  LHS42.@idcol = MHS.@idcol  @jointype JOIN @fromtables RHS ON LHS42.@numcol = RHS.@numcol
 
 

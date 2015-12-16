@@ -72,12 +72,15 @@ class CompactingHashUniqueIndex : public TableIndex
         return *reinterpret_cast<MapIterator*> (cursor.m_keyIter);
     }
 
-    bool addEntry(const TableTuple *tuple) {
+    void addEntryDo(const TableTuple *tuple, TableTuple *conflictTuple) {
         ++m_inserts;
-        return m_entries.insert(setKeyFromTuple(tuple), tuple->address());
+        const void* const* conflictEntry = m_entries.insert(setKeyFromTuple(tuple), tuple->address());
+        if (conflictEntry != NULL && conflictTuple != NULL) {
+            conflictTuple->move(const_cast<void*>(*conflictEntry));
+        }
     }
 
-    bool deleteEntry(const TableTuple *tuple) {
+    bool deleteEntryDo(const TableTuple *tuple) {
         ++m_deletes;
         return m_entries.erase(setKeyFromTuple(tuple));
     }
@@ -85,7 +88,7 @@ class CompactingHashUniqueIndex : public TableIndex
     /**
      * Update in place an index entry with a new tuple address
      */
-    bool replaceEntryNoKeyChange(const TableTuple &destinationTuple, const TableTuple &originalTuple)
+    bool replaceEntryNoKeyChangeDo(const TableTuple &destinationTuple, const TableTuple &originalTuple)
     {
         assert(originalTuple.address() != destinationTuple.address());
 
@@ -94,7 +97,9 @@ class CompactingHashUniqueIndex : public TableIndex
             if ( ! CompactingHashUniqueIndex::deleteEntry(&originalTuple)) {
                 return false;
             }
-            return CompactingHashUniqueIndex::addEntry(&destinationTuple);
+            TableTuple conflict(destinationTuple.getSchema());
+            CompactingHashUniqueIndex::addEntry(&destinationTuple, &conflict);
+            return conflict.isNullTuple();
         }
 
         MapIterator mapiter = findTuple(originalTuple);
@@ -108,11 +113,11 @@ class CompactingHashUniqueIndex : public TableIndex
 
     bool keyUsesNonInlinedMemory() const { return KeyType::keyUsesNonInlinedMemory(); }
 
-    bool checkForIndexChange(const TableTuple *lhs, const TableTuple *rhs) const {
+    bool checkForIndexChangeDo(const TableTuple *lhs, const TableTuple *rhs) const {
         return !(m_eq(setKeyFromTuple(lhs), setKeyFromTuple(rhs)));
     }
 
-    bool exists(const TableTuple *persistentTuple) const
+    bool existsDo(const TableTuple *persistentTuple) const
     {
         return ! findTuple(*persistentTuple).isEnd();
     }
@@ -120,6 +125,20 @@ class CompactingHashUniqueIndex : public TableIndex
     bool moveToKey(const TableTuple *searchKey, IndexCursor& cursor) const {
         MapIterator &mapIter = castToIter(cursor);
         mapIter = findKey(searchKey);
+
+        if (mapIter.isEnd()) {
+            cursor.m_match.move(NULL);
+            return false;
+        }
+        cursor.m_match.move(const_cast<void*>(mapIter.value()));
+
+        return true;
+    }
+
+    bool moveToKeyByTuple(const TableTuple *persistentTuple, IndexCursor &cursor) const
+    {
+        MapIterator &mapIter = castToIter(cursor);
+        mapIter = findTuple(*persistentTuple);
 
         if (mapIter.isEnd()) {
             cursor.m_match.move(NULL);

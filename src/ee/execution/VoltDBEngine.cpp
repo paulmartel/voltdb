@@ -45,6 +45,7 @@
 
 #include "VoltDBEngine.h"
 
+#include "ExecutorVector.h"
 #include "catalog/catalog.h"
 #include "catalog/catalogmap.h"
 #include "catalog/cluster.h"
@@ -54,9 +55,9 @@
 #include "catalog/database.h"
 #include "catalog/index.h"
 #include "catalog/materializedviewinfo.h"
-#include "catalog/table.h"
 #include "catalog/planfragment.h"
 #include "catalog/statement.h"
+#include "catalog/table.h"
 #include "common/ElasticHashinator.h"
 #include "common/executorcontext.hpp"
 #include "common/FailureInjection.h"
@@ -94,9 +95,6 @@
 
 #include <sstream>
 #include <locale>
-#ifdef LINUX
-#include <malloc.h>
-#endif // LINUX
 
 ENABLE_BOOST_FOREACH_ON_CONST_MAP(Column);
 ENABLE_BOOST_FOREACH_ON_CONST_MAP(Index);
@@ -106,8 +104,9 @@ ENABLE_BOOST_FOREACH_ON_CONST_MAP(Table);
 static const size_t PLAN_CACHE_SIZE = 1000;
 // how many initial tuples to scan before calling into java
 const int64_t LONG_OP_THRESHOLD = 10000;
-
-using namespace std;
+// table name prefix of DR conflict table
+const std::string DR_REPLICATED_CONFLICT_TABLE_NAME = "VOLTDB_AUTOGEN_XDCR_CONFLICTS_REPLICATED";
+const std::string DR_PARTITIONED_CONFLICT_TABLE_NAME = "VOLTDB_AUTOGEN_XDCR_CONFLICTS_PARTITIONED";
 
 namespace voltdb {
 
@@ -117,226 +116,6 @@ typedef std::pair<std::string, catalog::Column*> LabeledColumn;
 typedef std::pair<std::string, catalog::Index*> LabeledIndex;
 typedef std::pair<std::string, catalog::Table*> LabeledTable;
 typedef std::pair<std::string, catalog::MaterializedViewInfo*> LabeledView;
-
-/**
- * A list of executors for runtime.
- */
-class ExecutorVector {
-public:
-    /**
-     * This is the static factory method for creating instances of
-     * this class from a plan serialized to JSON.
-     */
-    static boost::shared_ptr<ExecutorVector> fromJsonPlan(VoltDBEngine* engine,
-                                                          const std::string& jsonPlan,
-                                                          int64_t fragId) {
-        PlanNodeFragment *pnf = NULL;
-        try {
-            pnf = PlanNodeFragment::createFromCatalog(jsonPlan);
-        }
-        catch (SerializableEEException &seee) {
-            throw;
-        }
-        catch (...) {
-            char msg[1024 * 100];
-            snprintf(msg, 1024 * 100, "Unable to initialize PlanNodeFragment for PlanFragment '%jd' with plan:\n%s",
-                     (intmax_t)fragId, jsonPlan.c_str());
-            VOLT_ERROR("%s", msg);
-            throw SerializableEEException(VOLT_EE_EXCEPTION_TYPE_EEEXCEPTION, msg);
-        }
-        VOLT_TRACE("\n%s\n", pnf->debug().c_str());
-        assert(pnf->getRootNode());
-
-        if (!pnf->getRootNode()) {
-            char msg[1024];
-            snprintf(msg, 1024, "Deserialized PlanNodeFragment for PlanFragment '%jd' does not have a root PlanNode",
-                     (intmax_t)fragId);
-            VOLT_ERROR("%s", msg);
-            throw SerializableEEException(VOLT_EE_EXCEPTION_TYPE_EEEXCEPTION, msg);
-        }
-
-        int64_t tempTableLogLimit = engine->tempTableLogLimit();
-        int64_t tempTableMemoryLimit = engine->tempTableMemoryLimit();
-
-        // ENG-1333 HACK.  If the plan node fragment has a delete node,
-        // then turn off the governors
-        if (pnf->hasDelete()) {
-            tempTableLogLimit = DEFAULT_TEMP_TABLE_MEMORY;
-            tempTableMemoryLimit = -1;
-        }
-
-        // Note: the executor vector takes ownership of the plan node
-        // fragment here.
-        boost::shared_ptr<ExecutorVector> ev(new ExecutorVector(fragId,
-                                                                tempTableLogLimit,
-                                                                tempTableMemoryLimit,
-                                                                pnf));
-        ev->init(engine);
-        return ev;
-    }
-
-    /** Build the list of executors from its plan node fragment */
-    void init(VoltDBEngine* engine) {
-        BOOST_FOREACH(AbstractPlanNode* planNode, m_fragment->getExecuteList()) {
-            initPlanNode(engine, planNode);
-            m_list.push_back(planNode->getExecutor());
-        }
-    }
-
-    /** Accessor function to satisfy boost::multi_index::const_mem_fun template. */
-    int64_t getFragId() const { return m_fragId; }
-
-    const TempTableLimits& limits() const { return m_limits; }
-
-    /** Return a string with helpful info about this object. */
-    std::string debug() const {
-        std::ostringstream oss;
-
-        oss << "Fragment ID: " << m_fragId << ", "
-            << "Executor list size: " << m_list.size() << ", "
-            << "Temp table memory in bytes: "
-            << m_limits.getAllocated() << endl;
-
-        BOOST_FOREACH (AbstractExecutor* ae, m_list) {
-            oss << ae->getPlanNode()->debug(" ") << "\n";
-        }
-
-        return oss.str();
-    }
-
-    /** Execute each executor, in order. */
-    int execute(VoltDBEngine* engine) {
-        // Walk through the queue and execute each plannode.  The
-        // query planner guarantees that for a given plannode, all of
-        // its children are positioned before it in this list,
-        // therefore dependency tracking is not needed here.
-        const NValueArray& params = engine->getParameterContainer();
-        int ctr = 0;
-        BOOST_FOREACH(AbstractExecutor *executor, m_list) {
-            assert (executor);
-
-            try {
-                // Now call the execute method to actually perform
-                // whatever action it is that the node is supposed to
-                // do...
-                if (!executor->execute(params)) {
-                    VOLT_TRACE("The Executor's execution at position '%d'"
-                               " failed for PlanFragment '%jd'",
-                               ctr, (intmax_t)m_fragId);
-                    cleanup(true);
-
-                    return ENGINE_ERRORCODE_ERROR;
-                }
-            } catch (const SerializableEEException &e) {
-                VOLT_TRACE("The Executor's execution at position '%d'"
-                           " failed for PlanFragment '%jd'",
-                           ctr, (intmax_t)m_fragId);
-                cleanup(true);
-                engine->serializeException(e);
-                return ENGINE_ERRORCODE_ERROR;
-            }
-
-            ++ctr;
-        }
-        // Clean up all the tempTable when each plan finishes and
-        // reset current InputDepId
-        cleanup(false);
-        return ENGINE_ERRORCODE_SUCCESS;
-    }
-
-private:
-
-    /**
-     * This method is private.  Please use static factory method
-     * fromJsonPlan to construct an instance of ExecutorVector.
-     *
-     * Construct an ExecutorVector instance.  Object will not be
-     * initialized until its init method is called.  (Initialization
-     * has been placed there to avoid throwing an exception in the
-     * constructor.)
-     *
-     * Note: This constructed instance of ExecutorVector takes
-     * ownership of the PlanNodeFragment here; it will be released
-     * (automatically via boost::scoped_ptr) when this instance goes
-     * away.
-     */
-    ExecutorVector(int64_t fragmentId,
-                   int64_t logThreshold,
-                   int64_t memoryLimit,
-                   PlanNodeFragment* fragment)
-        : m_fragId(fragmentId)
-        , m_list()
-        , m_limits(memoryLimit, logThreshold)
-        , m_fragment(fragment)
-    {
-    }
-
-    /** Clean up resources assocated with each executor and plan node. */
-    void cleanup(bool hasException) {
-        // Clean up all the tempTables when each plan finishes
-        BOOST_FOREACH (AbstractExecutor *executor, m_list) {
-            assert (executor);
-            executor->cleanupTempOutputTable();
-
-            if (hasException) {
-                AbstractPlanNode * node = executor->getPlanNode();
-                std::map<PlanNodeType, AbstractPlanNode*>::iterator it;
-                std::map<PlanNodeType, AbstractPlanNode*> inlineNodes = node->getInlinePlanNodes();
-                for (it = inlineNodes.begin(); it != inlineNodes.end(); it++ ) {
-                    AbstractPlanNode *inlineNode = it->second;
-                    inlineNode->getExecutor()->cleanupMemoryPool();
-                }
-            }
-        }
-
-        m_limits.resetPeakMemory();
-    }
-
-    void initPlanNode(VoltDBEngine* engine, AbstractPlanNode* node)
-    {
-        assert(node);
-        assert(node->getExecutor() == NULL);
-
-        // Executor is created here. An executor is *devoted* to this
-        // plannode so that it can cache anything for the plannode
-        AbstractExecutor* executor = getNewExecutor(engine, node);
-        if (executor == NULL) {
-            char message[256];
-            snprintf(message, sizeof(message), "Unexpected error. "
-                     "Invalid statement plan. A fragment (%jd) has an unknown plan node type (%d)",
-                     (intmax_t)m_fragId, (int)node->getPlanNodeType());
-            throw SerializableEEException(VOLT_EE_EXCEPTION_TYPE_EEEXCEPTION, message);
-        }
-        node->setExecutor(executor);
-
-        // If this PlanNode has an internal PlanNode (e.g.,
-        // AbstractScanPlanNode can have internal Projections), set
-        // that internal node's executor as well.
-        map<PlanNodeType, AbstractPlanNode*>::const_iterator internal_it;
-        for (internal_it = node->getInlinePlanNodes().begin();
-             internal_it != node->getInlinePlanNodes().end(); internal_it++) {
-            AbstractPlanNode* inline_node = internal_it->second;
-            initPlanNode(engine, inline_node);
-        }
-
-        // Now use the plannode to initialize the executor for execution later on
-        if (executor->init(engine, &m_limits)) {
-            return;
-        }
-
-        char msg[1024 * 10];
-        snprintf(msg, sizeof(msg),
-                 "The executor failed to initialize for PlanNode '%s' for PlanFragment '%jd'",
-                 node->debug().c_str(), (intmax_t)m_fragId);
-        VOLT_ERROR("%s", msg);
-        throw SerializableEEException(VOLT_EE_EXCEPTION_TYPE_EEEXCEPTION, msg);
-    }
-
-    const int64_t m_fragId;
-    std::vector<AbstractExecutor*> m_list;
-    TempTableLimits m_limits;
-    boost::scoped_ptr<PlanNodeFragment> m_fragment;
-};
 
 /**
  * The set of plan bytes is explicitly maintained in MRU-first order,
@@ -362,47 +141,24 @@ VoltDBEngine::VoltDBEngine(Topend *topend, LogProxy *logProxy)
       m_tuplesProcessedInFragment(0),
       m_tuplesProcessedSinceReport(0),
       m_tupleReportThreshold(LONG_OP_THRESHOLD),
-      m_lastAccessedTable(NULL),
+      m_lastAccessedPlanNodeType(PLAN_NODE_TYPE_INVALID),
       m_currentUndoQuantum(NULL),
       m_hashinator(NULL),
       m_staticParams(MAX_PARAM_COUNT),
       m_pfCount(0),
       m_currentInputDepId(-1),
-      m_isELEnabled(false),
       m_stringPool(16777216, 2),
       m_numResultDependencies(0),
       m_logManager(logProxy),
       m_templateSingleLongTable(NULL),
       m_topend(topend),
       m_executorContext(NULL),
+      m_drPartitionedConflictExportTable(NULL),
+      m_drReplicatedConflictExportTable(NULL),
+      m_drStream(NULL),
+      m_drReplicatedStream(NULL),
       m_tuplesModifiedStack()
 {
-#ifdef LINUX
-    // We ran into an issue where memory wasn't being returned to the
-    // operating system (and thus reducing RSS) when freeing. See
-    // ENG-891 for some info. It seems that some code we use somewhere
-    // (maybe JVM, but who knows) calls mallopt and changes some of
-    // the tuning parameters. At the risk of making that software
-    // angry, the following code resets the tunable parameters to
-    // their default values.
-
-    // Note: The parameters and default values come from looking at
-    // the glibc 2.5 source, which I is the version that shipps
-    // with redhat/centos 5. The code seems to also be effective on
-    // newer versions of glibc (tested againsts 2.12.1).
-
-    mallopt(M_MXFAST, 128);                 // DEFAULT_MXFAST
-    // note that DEFAULT_MXFAST was increased to 128 for 64-bit systems
-    // sometime between glibc 2.5 and glibc 2.12.1
-    mallopt(M_TRIM_THRESHOLD, 128 * 1024);  // DEFAULT_TRIM_THRESHOLD
-    mallopt(M_TOP_PAD, 0);                  // DEFAULT_TOP_PAD
-    mallopt(M_MMAP_THRESHOLD, 128 * 1024);  // DEFAULT_MMAP_THRESHOLD
-    mallopt(M_MMAP_MAX, 65536);             // DEFAULT_MMAP_MAX
-    mallopt(M_CHECK_ACTION, 3);             // DEFAULT_CHECK_ACTION
-#endif // LINUX
-    // Be explicit about running in the standard C locale for now.
-    locale::global(locale("C"));
-    setenv("TZ", "UTC", 0); // set timezone as "UTC" in EE level
 }
 
 bool
@@ -410,8 +166,10 @@ VoltDBEngine::initialize(int32_t clusterIndex,
                          int64_t siteId,
                          int32_t partitionId,
                          int32_t hostId,
-                         string hostname,
+                         std::string hostname,
+                         int32_t drClusterId,
                          int64_t tempTableMemoryLimit,
+                         bool createDrReplicatedStream,
                          int32_t compactionThreshold)
 {
     m_clusterIndex = clusterIndex;
@@ -451,18 +209,26 @@ VoltDBEngine::initialize(int32_t clusterIndex,
     m_templateSingleLongTable[38] = 1; // row count
     m_templateSingleLongTable[42] = 8; // row size
 
+    m_drStream = new DRTupleStream();
+    m_drStream->configure(partitionId);
+    if (createDrReplicatedStream) {
+        m_drReplicatedStream = new DRTupleStream();
+        m_drReplicatedStream->configure(16383);
+    }
+
     // required for catalog loading.
     m_executorContext = new ExecutorContext(siteId,
                                             m_partitionId,
                                             m_currentUndoQuantum,
                                             getTopend(),
                                             &m_stringPool,
+                                            &m_staticParams,
                                             this,
-                                            m_isELEnabled,
                                             hostname,
                                             hostId,
-                                            &m_drStream);
-    m_drStream.configure(partitionId);
+                                            m_drStream,
+                                            m_drReplicatedStream,
+                                            drClusterId);
     return true;
 }
 
@@ -489,7 +255,7 @@ VoltDBEngine::~VoltDBEngine() {
     }
 
     // Delete table delegates and release any table reference counts.
-    typedef pair<int64_t, Table*> TID;
+    typedef std::pair<int64_t, Table*> TID;
 
     BOOST_FOREACH (LabeledCD cd, m_catalogDelegates) {
         delete cd.second;
@@ -500,6 +266,9 @@ VoltDBEngine::~VoltDBEngine() {
     }
 
     delete m_executorContext;
+
+    delete m_drReplicatedStream;
+    delete m_drStream;
 }
 
 // ------------------------------------------------------------------
@@ -515,13 +284,13 @@ Table* VoltDBEngine::getTable(int32_t tableId) const
     return findInMapOrNull(tableId, m_tables);
 }
 
-Table* VoltDBEngine::getTable(string name) const
+Table* VoltDBEngine::getTable(std::string name) const
 {
     // Caller responsible for checking null return value.
     return findInMapOrNull(name, m_tablesByName);
 }
 
-TableCatalogDelegate* VoltDBEngine::getTableDelegate(string name) const
+TableCatalogDelegate* VoltDBEngine::getTableDelegate(std::string name) const
 {
     // Caller responsible for checking null return value.
     CatalogDelegate * delegate = findInMapOrNull(name, m_delegatesByName);
@@ -662,31 +431,21 @@ int VoltDBEngine::executePlanFragment(int64_t planfragmentId,
     ++m_pfCount;
 
     // execution lists for planfragments are cached by planfragment id
-    ExecutorVector *execsForFrag = NULL;
     try {
-        execsForFrag = getExecutorVectorForFragmentId(planfragmentId);
+        setExecutorVectorForFragmentId(planfragmentId);
+        assert(m_currExecutorVec);
+        // Launch the target plan through its top-most executor list.
+        m_executorContext->executeExecutors(0);
+        m_executorContext->cleanupAllExecutors();
     }
     catch (const SerializableEEException &e) {
         serializeException(e);
-
-        // set this back to -1 for error handling
-        m_currentInputDepId = -1;
-        m_currExecutorVec = NULL;
-
+        resetExecutionMetadata();
         return ENGINE_ERRORCODE_ERROR;
     }
-    assert(execsForFrag);
-    m_currExecutorVec = execsForFrag;
-
-    int rc = execsForFrag->execute(this);
 
     int64_t tuplesModified = m_tuplesModifiedStack.top();
-    m_tuplesModifiedStack.pop();
     resetExecutionMetadata();
-
-    if (rc != ENGINE_ERRORCODE_SUCCESS) {
-        return rc;
-    }
 
     // assume this is sendless dml
     if (m_numResultDependencies == 0) {
@@ -718,8 +477,26 @@ int VoltDBEngine::executePlanFragment(int64_t planfragmentId,
 }
 
 void VoltDBEngine::resetExecutionMetadata() {
+
+    // If we get here, we've completed execution successfully, or
+    // recovered after an error.  In any case, we should be able to
+    // assert that temp tables are now cleared.
+    DEBUG_ASSERT_OR_THROW_OR_CRASH(m_executorContext->allOutputTempTablesAreEmpty(),
+                                   "Output temp tables not cleaned up after execution");
+
+    if (m_tuplesModifiedStack.size() != 0) {
+        m_tuplesModifiedStack.pop();
+    }
+    assert (m_tuplesModifiedStack.size() == 0);
+
     // set this back to -1 for error handling
     m_currentInputDepId = -1;
+    if (m_currExecutorVec == NULL) {
+        // This is usually the result of some planner error producing an
+        // invalid plan that can not be converted into plan nodes / executors.
+        return;
+    }
+    m_currExecutorVec->resetLimitStats();
     m_currExecutorVec = NULL;
 }
 
@@ -763,7 +540,7 @@ bool VoltDBEngine::updateCatalogDatabaseReference() {
     return true;
 }
 
-bool VoltDBEngine::loadCatalog(const int64_t timestamp, const string &catalogPayload) {
+bool VoltDBEngine::loadCatalog(const int64_t timestamp, const std::string &catalogPayload) {
     assert(m_executorContext != NULL);
     ExecutorContext* executorContext = ExecutorContext::getExecutorContext();
     if (executorContext == NULL) {
@@ -783,16 +560,13 @@ bool VoltDBEngine::loadCatalog(const int64_t timestamp, const string &catalogPay
         return false;
     }
 
-    // deal with the epoch
+    // Set DR flag based on current catalog state
     catalog::Cluster* catalogCluster = m_catalog->clusters().get("cluster");
-    int64_t epoch = catalogCluster->localepoch() * (int64_t)1000;
-    m_executorContext->setEpoch(epoch);
-
-    // Tables care about EL state.
-    if (m_database->connectors().size() > 0 && m_database->connectors().get("0")->enabled()) {
-        VOLT_DEBUG("EL enabled.");
-        m_executorContext->m_exportEnabled = true;
-        m_isELEnabled = true;
+    m_drStream->m_enabled = catalogCluster->drProducerEnabled();
+    m_drStream->m_flushInterval = catalogCluster->drFlushInterval();
+    if (m_drReplicatedStream) {
+        m_drReplicatedStream->m_enabled = m_drStream->m_enabled;
+        m_drReplicatedStream->m_flushInterval = m_drStream->m_flushInterval;
     }
 
     // load up all the tables, adding all tables
@@ -826,14 +600,14 @@ bool VoltDBEngine::loadCatalog(const int64_t timestamp, const string &catalogPay
 void
 VoltDBEngine::processCatalogDeletes(int64_t timestamp )
 {
-    vector<string> deletion_vector;
+    std::vector<std::string> deletion_vector;
     m_catalog->getDeletedPaths(deletion_vector);
-    set<string> deletions(deletion_vector.begin(), deletion_vector.end());
+    std::set<std::string> deletions(deletion_vector.begin(), deletion_vector.end());
 
     // delete any empty persistent tables, forcing them to be rebuilt
     // (Unless the are actually being deleted -- then this does nothing)
 
-    BOOST_FOREACH(LabeledCD delegatePair, m_catalogDelegates) {
+    BOOST_FOREACH (LabeledCD delegatePair, m_catalogDelegates) {
         CatalogDelegate *delegate = delegatePair.second;
         TableCatalogDelegate *tcd = dynamic_cast<TableCatalogDelegate*>(delegate);
         Table* table = tcd->getTable();
@@ -851,10 +625,10 @@ VoltDBEngine::processCatalogDeletes(int64_t timestamp )
     }
 
     // delete tables in the set
-    BOOST_FOREACH (string path, deletions) {
+    BOOST_FOREACH (std::string path, deletions) {
         VOLT_TRACE("delete path:");
 
-        map<string, CatalogDelegate*>::iterator pos = m_catalogDelegates.find(path);
+        std::map<std::string, CatalogDelegate*>::iterator pos = m_catalogDelegates.find(path);
         if (pos == m_catalogDelegates.end()) {
            continue;
         }
@@ -872,8 +646,8 @@ VoltDBEngine::processCatalogDeletes(int64_t timestamp )
             StreamedTable *streamedtable = dynamic_cast<StreamedTable*>(table);
             if (streamedtable) {
                 const std::string signature = tcd->signature();
-                m_exportingTables.erase(signature);
                 streamedtable->setSignatureAndGeneration(signature, timestamp);
+                m_exportingTables.erase(signature);
             }
         }
         delete delegate;
@@ -881,15 +655,19 @@ VoltDBEngine::processCatalogDeletes(int64_t timestamp )
     }
 }
 
-static bool haveDifferentSchema(catalog::Table *t1, voltdb::Table *t2)
+static bool haveDifferentSchema(catalog::Table *t1, voltdb::PersistentTable *t2)
 {
     // covers column count
     if (t1->columns().size() != t2->columnCount()) {
         return true;
     }
 
+    if (t1->isDRed() != t2->isDREnabled()) {
+        return true;
+    }
+
     // make sure each column has same metadata
-    map<string, catalog::Column*>::const_iterator outerIter;
+    std::map<std::string, catalog::Column*>::const_iterator outerIter;
     for (outerIter = t1->columns().begin();
          outerIter != t1->columns().end();
          outerIter++)
@@ -988,7 +766,6 @@ VoltDBEngine::processCatalogAdditions(int64_t timestamp)
             //////////////////////////////////////////////
 
             Table *table = tcd->getTable();
-
             PersistentTable *persistenttable = dynamic_cast<PersistentTable*>(table);
             /*
              * Instruct the table that was not added but is being retained to flush
@@ -1000,6 +777,14 @@ VoltDBEngine::processCatalogAdditions(int64_t timestamp)
                 StreamedTable *streamedtable = dynamic_cast<StreamedTable*>(table);
                 assert(streamedtable);
                 streamedtable->setSignatureAndGeneration(catalogTable->signature(), timestamp);
+                if (!tcd->exportEnabled()) {
+                    //Evaluate export enabled or not if enabled hook up streamer
+                    if (tcd->evaluateExport(*m_database, *catalogTable) && streamedtable->enableStream()) {
+                        //Reset generation after stream wrapper is is created.
+                        streamedtable->setSignatureAndGeneration(catalogTable->signature(), timestamp);
+                        m_exportingTables[catalogTable->signature()] = table;
+                    }
+                }
                 // note, this is the end of the line for export tables for now,
                 // don't allow them to change schema yet
                 continue;
@@ -1015,13 +800,13 @@ VoltDBEngine::processCatalogAdditions(int64_t timestamp)
                 char msg[512];
                 snprintf(msg, sizeof(msg), "Table %s has changed schema and will be rebuilt.",
                          catalogTable->name().c_str());
-                LogManager::getThreadLogger(LOGGERID_HOST)->log(LOGLEVEL_INFO, msg);
+                LogManager::getThreadLogger(LOGGERID_HOST)->log(LOGLEVEL_DEBUG, msg);
 
                 tcd->processSchemaChanges(*m_database, *catalogTable, m_delegatesByName);
 
                 snprintf(msg, sizeof(msg), "Table %s was successfully rebuilt with new schema.",
                          catalogTable->name().c_str());
-                LogManager::getThreadLogger(LOGGERID_HOST)->log(LOGLEVEL_INFO, msg);
+                LogManager::getThreadLogger(LOGGERID_HOST)->log(LOGLEVEL_DEBUG, msg);
 
                 // don't continue on to modify/add/remove indexes, because the
                 // call above should rebuild them all anyway
@@ -1039,7 +824,7 @@ VoltDBEngine::processCatalogAdditions(int64_t timestamp)
             // find all of the indexes to add
             //////////////////////////////////////////
 
-            const vector<TableIndex*> currentIndexes = persistenttable->allIndexes();
+            const std::vector<TableIndex*> currentIndexes = persistenttable->allIndexes();
 
             // iterate over indexes for this table in the catalog
             BOOST_FOREACH (LabeledIndex labeledIndex, catalogTable->indexes()) {
@@ -1117,9 +902,9 @@ VoltDBEngine::processCatalogAdditions(int64_t timestamp)
             // now find all of the materialized views to remove
             ///////////////////////////////////////////////////
 
-            vector<catalog::MaterializedViewInfo*> survivingInfos;
-            vector<MaterializedViewMetadata*> survivingViews;
-            vector<MaterializedViewMetadata*> obsoleteViews;
+            std::vector<catalog::MaterializedViewInfo*> survivingInfos;
+            std::vector<MaterializedViewMetadata*> survivingViews;
+            std::vector<MaterializedViewMetadata*> obsoleteViews;
 
             const catalog::CatalogMap<catalog::MaterializedViewInfo> & views = catalogTable->views();
             persistenttable->segregateMaterializedViews(views.begin(), views.end(),
@@ -1177,7 +962,7 @@ VoltDBEngine::processCatalogAdditions(int64_t timestamp)
  * delete or modify the corresponding exectution engine objects.
  */
 bool
-VoltDBEngine::updateCatalog(const int64_t timestamp, const string &catalogPayload)
+VoltDBEngine::updateCatalog(const int64_t timestamp, const std::string &catalogPayload)
 {
     // clean up execution plans when the tables underneath might change
     if (m_plans) {
@@ -1191,6 +976,15 @@ VoltDBEngine::updateCatalog(const int64_t timestamp, const string &catalogPayloa
     // apply the diff commands to the existing catalog
     // throws SerializeEEExceptions on error.
     m_catalog->execute(catalogPayload);
+
+    // Set DR flag based on current catalog state
+    catalog::Cluster* catalogCluster = m_catalog->clusters().get("cluster");
+    m_drStream->m_enabled = catalogCluster->drProducerEnabled();
+    m_drStream->m_flushInterval = catalogCluster->drFlushInterval();
+    if (m_drReplicatedStream) {
+        m_drReplicatedStream->m_enabled = m_drStream->m_enabled;
+        m_drReplicatedStream->m_flushInterval = m_drStream->m_flushInterval;
+    }
 
     if (updateCatalogDatabaseReference() == false) {
         VOLT_ERROR("Error re-caching catalog references.");
@@ -1217,6 +1011,7 @@ bool
 VoltDBEngine::loadTable(int32_t tableId,
                         ReferenceSerializeInputBE &serializeIn,
                         int64_t txnId, int64_t spHandle, int64_t lastCommittedSpHandle,
+                        int64_t uniqueId,
                         bool returnUniqueViolations,
                         bool shouldDRStream)
 {
@@ -1227,8 +1022,8 @@ VoltDBEngine::loadTable(int32_t tableId,
     m_executorContext->setupForPlanFragments(getCurrentUndoQuantum(),
                                              txnId,
                                              spHandle,
-                                             -1,
-                                             lastCommittedSpHandle);
+                                             lastCommittedSpHandle,
+                                             uniqueId);
 
     Table* ret = getTable(tableId);
     if (ret == NULL) {
@@ -1294,9 +1089,18 @@ void VoltDBEngine::rebuildTableCollections()
             }
         }
     }
+
+    if (getIsActiveActiveDREnabled()) {
+        m_drPartitionedConflictExportTable = getTable(DR_PARTITIONED_CONFLICT_TABLE_NAME);
+        m_drReplicatedConflictExportTable = getTable(DR_REPLICATED_CONFLICT_TABLE_NAME);
+    }
+    else {
+        m_drPartitionedConflictExportTable = NULL;
+        m_drReplicatedConflictExportTable = NULL;
+    }
 }
 
-ExecutorVector *VoltDBEngine::getExecutorVectorForFragmentId(const int64_t fragId)
+void VoltDBEngine::setExecutorVectorForFragmentId(int64_t fragId)
 {
     if (m_plans) {
         PlanSet& existing_plans = *m_plans;
@@ -1307,9 +1111,10 @@ ExecutorVector *VoltDBEngine::getExecutorVectorForFragmentId(const int64_t fragI
             // move it to the front of the list
             PlanSet::iterator iter2 = existing_plans.project<0>(iter);
             existing_plans.get<0>().relocate(existing_plans.begin(), iter2);
-            ExecutorVector *retval = (*iter).get();
-            assert(retval);
-            return retval;
+            m_currExecutorVec = (*iter).get();
+            // update the context
+            m_currExecutorVec->setupContext(m_executorContext);
+            return;
         }
     } else {
         m_plans.reset(new EnginePlanSet());
@@ -1325,13 +1130,13 @@ ExecutorVector *VoltDBEngine::getExecutorVectorForFragmentId(const int64_t fragI
         throw SerializableEEException(VOLT_EE_EXCEPTION_TYPE_EEEXCEPTION, msg);
     }
 
-    boost::shared_ptr<ExecutorVector> ev = ExecutorVector::fromJsonPlan(this, plan, fragId);
+    boost::shared_ptr<ExecutorVector> ev_guard = ExecutorVector::fromJsonPlan(this, plan, fragId);
 
     // add the plan to the back
     //
     // (Why to the back?  Shouldn't it be at the front with the
     // most recently used items?  See ENG-7244)
-    plans.get<0>().push_back(ev);
+    plans.get<0>().push_back(ev_guard);
 
     // remove a plan from the front if the cache is full
     if (plans.size() > PLAN_CACHE_SIZE) {
@@ -1339,7 +1144,10 @@ ExecutorVector *VoltDBEngine::getExecutorVectorForFragmentId(const int64_t fragI
         plans.erase(iter);
     }
 
-    return ev.get();
+    m_currExecutorVec = ev_guard.get();
+    assert(m_currExecutorVec);
+    // update the context
+    m_currExecutorVec->setupContext(m_executorContext);
 }
 
 // -------------------------------------------------
@@ -1418,7 +1226,7 @@ bool VoltDBEngine::isLocalSite(const NValue& value)
     return index == m_partitionId;
 }
 
-typedef pair<string, Table*> TablePair;
+typedef std::pair<std::string, Table*> TablePair;
 
 /** Perform once per second, non-transactional work. */
 void VoltDBEngine::tick(int64_t timeInMillis, int64_t lastCommittedSpHandle) {
@@ -1426,7 +1234,10 @@ void VoltDBEngine::tick(int64_t timeInMillis, int64_t lastCommittedSpHandle) {
     BOOST_FOREACH (TablePair table, m_exportingTables) {
         table.second->flushOldTuples(timeInMillis);
     }
-    m_drStream.periodicFlush(timeInMillis, lastCommittedSpHandle);
+    m_drStream->periodicFlush(timeInMillis, lastCommittedSpHandle);
+    if (m_drReplicatedStream) {
+        m_drReplicatedStream->periodicFlush(timeInMillis, lastCommittedSpHandle);
+    }
 }
 
 /** For now, bring the Export system to a steady state with no buffers with content */
@@ -1435,16 +1246,19 @@ void VoltDBEngine::quiesce(int64_t lastCommittedSpHandle) {
     BOOST_FOREACH (TablePair table, m_exportingTables) {
         table.second->flushOldTuples(-1L);
     }
-    m_drStream.periodicFlush(-1L, lastCommittedSpHandle);
+    m_drStream->periodicFlush(-1L, lastCommittedSpHandle);
+    if (m_drReplicatedStream) {
+        m_drReplicatedStream->periodicFlush(-1L, lastCommittedSpHandle);
+    }
 }
 
-string VoltDBEngine::debug(void) const
+std::string VoltDBEngine::debug(void) const
 {
     if ( ! m_plans) {
         return "";
     }
     PlanSet& plans = *m_plans;
-    ostringstream output;
+    std::ostringstream output;
 
     BOOST_FOREACH (boost::shared_ptr<ExecutorVector> ev_guard, plans) {
         ev_guard->debug();
@@ -1473,7 +1287,7 @@ int VoltDBEngine::getStats(int selector, int locators[], int numLocators,
                            bool interval, int64_t now)
 {
     Table *resultTable = NULL;
-    vector<CatalogId> locatorIds;
+    std::vector<CatalogId> locatorIds;
 
     for (int ii = 0; ii < numLocators; ii++) {
         CatalogId locator = static_cast<CatalogId>(locators[ii]);
@@ -1663,7 +1477,7 @@ int64_t VoltDBEngine::tableStreamSerializeMore(
 
     if (!tableStreamTypeIsValid(streamType)) {
         // Failure
-        return -1;
+        return TABLE_STREAM_SERIALIZATION_ERROR;
     }
 
     TupleOutputStreamProcessor outputStreams(nBuffers);
@@ -1671,7 +1485,7 @@ int64_t VoltDBEngine::tableStreamSerializeMore(
         char *ptr = reinterpret_cast<char*>(serializeIn.readLong());
         int offset = serializeIn.readInt();
         int length = serializeIn.readInt();
-        outputStreams.add(ptr + offset, length - offset);
+        outputStreams.add(ptr + offset, length);
     }
     retPositions.reserve(nBuffers);
 
@@ -1679,7 +1493,7 @@ int64_t VoltDBEngine::tableStreamSerializeMore(
     // If a completed table is polled, return remaining==-1. The
     // Java engine will always poll a fully serialized table one more
     // time (it doesn't see the hasMore return code).
-    int64_t remaining = -1;
+    int64_t remaining = TABLE_STREAM_SERIALIZATION_ERROR;
     PersistentTable *table = NULL;
 
     if (tableStreamTypeIsSnapshot(streamType)) {
@@ -1688,6 +1502,9 @@ int64_t VoltDBEngine::tableStreamSerializeMore(
         // time (it doesn't see the hasMore return code).  Note that the
         // dynamic cast was already verified in activateCopyOnWrite.
         table = findInMapOrNull(tableId, m_snapshottingTables);
+        if (table == NULL) {
+            return TABLE_STREAM_SERIALIZATION_ERROR;
+        }
 
         remaining = table->streamMore(outputStreams, streamType, retPositions);
         if (remaining <= 0) {
@@ -1697,9 +1514,10 @@ int64_t VoltDBEngine::tableStreamSerializeMore(
     }
     else if (tableStreamTypeAppliesToPreTruncateTable(streamType)) {
         Table* found = getTable(tableId);
-        if (!found) {
-            return -1;
+        if (found == NULL) {
+            return TABLE_STREAM_SERIALIZATION_ERROR;
         }
+
         PersistentTable * currentTable = dynamic_cast<PersistentTable*>(found);
         assert(currentTable != NULL);
         // The ongoing TABLE STREAM needs the original table from the first table truncate.
@@ -1719,10 +1537,12 @@ int64_t VoltDBEngine::tableStreamSerializeMore(
     }
     else {
         Table* found = getTable(tableId);
-        if (found) {
-            table = dynamic_cast<PersistentTable*>(found);
-            remaining = table->streamMore(outputStreams, streamType, retPositions);
+        if (found == NULL) {
+            return TABLE_STREAM_SERIALIZATION_ERROR;
         }
+
+        table = dynamic_cast<PersistentTable*>(found);
+        remaining = table->streamMore(outputStreams, streamType, retPositions);
     }
 
     return remaining;
@@ -1746,7 +1566,7 @@ void VoltDBEngine::processRecoveryMessage(RecoveryProtoMsg *message) {
 int64_t
 VoltDBEngine::exportAction(bool syncAction, int64_t ackOffset, int64_t seqNo, std::string tableSignature)
 {
-    map<string, Table*>::iterator pos = m_exportingTables.find(tableSignature);
+    std::map<std::string, Table*>::iterator pos = m_exportingTables.find(tableSignature);
 
     // return no data and polled offset for unavailable tables.
     if (pos == m_exportingTables.end()) {
@@ -1777,7 +1597,7 @@ void VoltDBEngine::getUSOForExportTable(size_t &ackOffset, int64_t &seqNo, std::
     ackOffset = 0;
     seqNo = -1;
 
-    map<string, Table*>::iterator pos = m_exportingTables.find(tableSignature);
+    std::map<std::string, Table*>::iterator pos = m_exportingTables.find(tableSignature);
 
     // return no data and polled offset for unavailable tables.
     if (pos == m_exportingTables.end()) {
@@ -1861,20 +1681,71 @@ void VoltDBEngine::dispatchValidatePartitioningTask(const char *taskParams) {
     }
 }
 
+void VoltDBEngine::collectDRTupleStreamStateInfo() {
+    std::size_t size = 3 * sizeof(int64_t) + 1;
+    if (m_drReplicatedStream) {
+        size += 3 * sizeof(int64_t);
+    }
+    m_resultOutput.writeInt(static_cast<int32_t>(size));
+    DRCommittedInfo drInfo = m_drStream->getLastCommittedSequenceNumberAndUniqueIds();
+    m_resultOutput.writeLong(drInfo.seqNum);
+    m_resultOutput.writeLong(drInfo.spUniqueId);
+    m_resultOutput.writeLong(drInfo.mpUniqueId);
+    if (m_drReplicatedStream) {
+        m_resultOutput.writeByte(static_cast<int8_t>(1));
+        drInfo = m_drReplicatedStream->getLastCommittedSequenceNumberAndUniqueIds();
+        m_resultOutput.writeLong(drInfo.seqNum);
+        m_resultOutput.writeLong(drInfo.spUniqueId);
+        m_resultOutput.writeLong(drInfo.mpUniqueId);
+    } else {
+        m_resultOutput.writeByte(static_cast<int8_t>(0));
+    }
+}
+
+int64_t VoltDBEngine::applyBinaryLog(int64_t txnId,
+                                  int64_t spHandle,
+                                  int64_t lastCommittedSpHandle,
+                                  int64_t uniqueId,
+                                  int32_t remoteClusterId,
+                                  int64_t undoToken,
+                                  const char *log) {
+    DRTupleStreamDisableGuard guard(m_drStream, m_drReplicatedStream, !m_database->isActiveActiveDRed());
+    setUndoToken(undoToken);
+    m_executorContext->setupForPlanFragments(getCurrentUndoQuantum(),
+                                             txnId,
+                                             spHandle,
+                                             lastCommittedSpHandle,
+                                             uniqueId);
+
+    return m_binaryLogSink.apply(log, m_tablesBySignatureHash, &m_stringPool, this, remoteClusterId);
+}
+
 void VoltDBEngine::executeTask(TaskType taskType, const char* taskParams) {
     switch (taskType) {
     case TASK_TYPE_VALIDATE_PARTITIONING:
         dispatchValidatePartitioningTask(taskParams);
         break;
-    case TASK_TYPE_APPLY_BINARY_LOG:
-        m_binaryLogSink.apply(taskParams, m_tablesBySignatureHash, &m_stringPool);
+    case TASK_TYPE_GET_DR_TUPLESTREAM_STATE:
+        collectDRTupleStreamStateInfo();
         break;
+    case TASK_TYPE_SET_DR_SEQUENCE_NUMBERS: {
+        ReferenceSerializeInputBE taskInfo(taskParams, std::numeric_limits<std::size_t>::max());
+        int64_t partitionSequenceNumber = taskInfo.readLong();
+        int64_t mpSequenceNumber = taskInfo.readLong();
+        if (partitionSequenceNumber >= 0) {
+            m_drStream->setLastCommittedSequenceNumber(partitionSequenceNumber);
+        }
+        if (m_drReplicatedStream && mpSequenceNumber >= 0) {
+            m_drReplicatedStream->setLastCommittedSequenceNumber(mpSequenceNumber);
+        }
+        break;
+    }
     default:
         throwFatalException("Unknown task type %d", taskType);
     }
 }
 
-int VoltDBEngine::executePurgeFragment(PersistentTable* table) {
+void VoltDBEngine::executePurgeFragment(PersistentTable* table) {
     boost::shared_ptr<ExecutorVector> pev = table->getPurgeExecutorVector();
 
     // Push a new frame onto the stack for this executor vector
@@ -1882,54 +1753,55 @@ int VoltDBEngine::executePurgeFragment(PersistentTable* table) {
     // send this count back to the client---too confusing.  Just
     // throw it away.
     m_tuplesModifiedStack.push(0);
-    int rc = pev->execute(this);
-    m_tuplesModifiedStack.pop();
+    pev->setupContext(m_executorContext);
 
-    return rc;
+    try {
+        m_executorContext->executeExecutors(0);
+    } catch (const SerializableEEException &e) {
+        // restore original DML statement state.
+        m_currExecutorVec->setupContext(m_executorContext);
+        m_tuplesModifiedStack.pop();
+        throw;
+    }
+    m_executorContext->cleanupAllExecutors();
+    // restore original DML statement state.
+    m_currExecutorVec->setupContext(m_executorContext);
+    m_tuplesModifiedStack.pop();
 }
 
 static std::string dummy_last_accessed_plan_node_name("no plan node in progress");
 
 void VoltDBEngine::reportProgressToTopend() {
-    std::string tableName;
-    int64_t tableSize;
-
     assert(m_currExecutorVec);
 
-    if (m_lastAccessedTable == NULL) {
-        tableName = "None";
-        tableSize = 0;
-    }
-    else {
-        tableName = m_lastAccessedTable->name();
-        tableSize = m_lastAccessedTable->activeTupleCount();
-    }
     //Update stats in java and let java determine if we should cancel this query.
     m_tuplesProcessedInFragment += m_tuplesProcessedSinceReport;
-    m_tupleReportThreshold = m_topend->fragmentProgressUpdate(m_currentIndexInBatch,
-                                        (m_lastAccessedExec == NULL) ?
-                                        dummy_last_accessed_plan_node_name :
-                                        planNodeToString(m_lastAccessedExec->getPlanNode()->getPlanNodeType()),
-                                        tableName,
-                                        tableSize,
+    int64_t tupleReportThreshold = m_topend->fragmentProgressUpdate(m_currentIndexInBatch,
+                                        m_lastAccessedPlanNodeType,
                                         m_tuplesProcessedInBatch + m_tuplesProcessedInFragment,
                                         m_currExecutorVec->limits().getAllocated(),
                                         m_currExecutorVec->limits().getPeakMemoryInBytes());
     m_tuplesProcessedSinceReport = 0;
-    if (m_tupleReportThreshold < 0) {
+
+    if (tupleReportThreshold < 0) {
         VOLT_DEBUG("Interrupt query.");
         char buff[100];
         snprintf(buff, 100,
-                "A SQL query was terminated after %.2f seconds because it exceeded the query timeout period.",
-                static_cast<double>(m_tupleReportThreshold) / -1000.0);
+                "A SQL query was terminated after %.03f seconds because it exceeded the query timeout period.",
+                static_cast<double>(tupleReportThreshold) / -1000.0);
 
         throw InterruptException(std::string(buff));
     }
+    m_tupleReportThreshold = tupleReportThreshold;
 }
 
 void VoltDBEngine::addToTuplesModified(int64_t amount) {
     assert(m_tuplesModifiedStack.size() > 0);
     m_tuplesModifiedStack.top() += amount;
+}
+
+bool VoltDBEngine::getIsActiveActiveDREnabled() const {
+    return getDatabase()->isActiveActiveDRed();
 }
 
 } // namespace voltdb

@@ -46,7 +46,7 @@ public:
     PersistentTableMemStatsTest() {
         m_engine = new VoltDBEngine();
         int partitionCount = 1;
-        m_engine->initialize(1,1, 0, 0, "", DEFAULT_TEMP_TABLE_MEMORY);
+        m_engine->initialize(1,1, 0, 0, "", 0, DEFAULT_TEMP_TABLE_MEMORY, false);
         m_engine->updateHashinator( HASHINATOR_LEGACY, (char*)&partitionCount, NULL, 0);
 
         m_columnNames.push_back("0");
@@ -91,7 +91,7 @@ public:
         vector<TableIndexScheme> indexes;
 
         m_table = dynamic_cast<PersistentTable*>(
-            TableFactory::getPersistentTable(0, "Foo", m_tableSchema, m_columnNames, signature, &drStream, false, 0));
+            TableFactory::getPersistentTable(0, "Foo", m_tableSchema, m_columnNames, signature));
 
         TableIndex *pkeyIndex = TableIndexFactory::TableIndexFactory::getInstance(indexScheme);
         assert(pkeyIndex);
@@ -109,7 +109,6 @@ public:
     VoltDBEngine *m_engine;
     TupleSchema *m_tableSchema;
     PersistentTable *m_table;
-    MockDRTupleStream drStream;
     vector<string> m_columnNames;
     vector<ValueType> m_tableSchemaTypes;
     vector<int32_t> m_tableSchemaColumnSizes;
@@ -129,8 +128,8 @@ TEST_F(PersistentTableMemStatsTest, InsertTest) {
     tableutil::setRandomTupleValues(m_table, &tuple);
     //cout << "Created random tuple " << endl << tuple.debugNoHeader() << endl;
     size_t added_bytes =
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tuple.getNValue(1))) +
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tuple.getNValue(2)));
+        tuple.getNValue(1).getAllocationSizeForObject() +
+        tuple.getNValue(2).getAllocationSizeForObject();
     //cout << "Allocating string mem for bytes: " << ValuePeeker::peekObjectLength(tuple.getNValue(1)) + sizeof(int32_t) << endl;
     //cout << "Adding bytes to table: " << added_bytes << endl;
 
@@ -160,8 +159,8 @@ TEST_F(PersistentTableMemStatsTest, InsertThenUndoInsertTest) {
     tableutil::setRandomTupleValues(m_table, &tuple);
     //cout << "Created random tuple " << endl << tuple.debugNoHeader() << endl;
     size_t added_bytes =
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tuple.getNValue(1))) +
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tuple.getNValue(2)));
+        tuple.getNValue(1).getAllocationSizeForObject() +
+        tuple.getNValue(2).getAllocationSizeForObject();
     //cout << "Adding bytes to table: " << added_bytes << endl;
 
     m_engine->setUndoToken(INT64_MIN + 2);
@@ -194,8 +193,8 @@ TEST_F(PersistentTableMemStatsTest, UpdateTest) {
     //cout << "Retrieved random tuple " << endl << tuple.debugNoHeader() << endl;
 
     size_t removed_bytes =
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tuple.getNValue(1))) +
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tuple.getNValue(2)));
+        tuple.getNValue(1).getAllocationSizeForObject() +
+        tuple.getNValue(2).getAllocationSizeForObject();
     //cout << "Removing bytes from table: " << removed_bytes << endl;
 
     /*
@@ -209,8 +208,8 @@ TEST_F(PersistentTableMemStatsTest, UpdateTest) {
     tempTuple.setNValue(1, new_string);
     //cout << "Created updated tuple " << endl << tempTuple.debugNoHeader() << endl;
     size_t added_bytes =
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tempTuple.getNValue(1))) +
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tempTuple.getNValue(2)));
+        tempTuple.getNValue(1).getAllocationSizeForObject() +
+        tempTuple.getNValue(2).getAllocationSizeForObject();
     //cout << "Adding bytes to table: " << added_bytes << endl;
 
     m_engine->setUndoToken(INT64_MIN + 2);
@@ -243,8 +242,8 @@ TEST_F(PersistentTableMemStatsTest, UpdateAndUndoTest) {
     //cout << "Retrieved random tuple " << endl << tuple.debugNoHeader() << endl;
 
     size_t removed_bytes =
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tuple.getNValue(1))) +
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tuple.getNValue(2)));
+        tuple.getNValue(1).getAllocationSizeForObject() +
+        tuple.getNValue(2).getAllocationSizeForObject();
     //cout << "Removing bytes from table: " << removed_bytes << endl;
 
     /*
@@ -258,8 +257,8 @@ TEST_F(PersistentTableMemStatsTest, UpdateAndUndoTest) {
     tempTuple.setNValue(1, new_string);
     //cout << "Created random tuple " << endl << tempTuple.debugNoHeader() << endl;
     size_t added_bytes =
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tempTuple.getNValue(1))) +
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tempTuple.getNValue(2)));
+        tempTuple.getNValue(1).getAllocationSizeForObject() +
+        tempTuple.getNValue(2).getAllocationSizeForObject();
     //cout << "Adding bytes to table: " << added_bytes << endl;
 
     m_engine->setUndoToken(INT64_MIN + 2);
@@ -293,8 +292,8 @@ TEST_F(PersistentTableMemStatsTest, DeleteTest) {
     //cout << "Retrieved random tuple " << endl << tuple.debugNoHeader() << endl;
 
     size_t removed_bytes =
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tuple.getNValue(1))) +
-        StringRef::computeStringMemoryUsed(ValuePeeker::peekObjectLength_withoutNull(tuple.getNValue(2)));
+        tuple.getNValue(1).getAllocationSizeForObject() +
+        tuple.getNValue(2).getAllocationSizeForObject();
     //cout << "Removing bytes from table: " << removed_bytes << endl;
 
     m_engine->setUndoToken(INT64_MIN + 2);

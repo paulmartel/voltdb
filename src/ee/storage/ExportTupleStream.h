@@ -46,7 +46,7 @@ public:
     /** Set the total number of bytes used (for rejoin/recover) */
     void setBytesUsed(size_t count) {
         assert(m_uso == 0);
-        StreamBlock *sb = new StreamBlock(new char[1], 0, count);
+        StreamBlock *sb = new StreamBlock(new char[1], 0, 0, count);
         ExecutorContext::getExecutorContext()->getTopend()->pushExportBuffer(
                                 m_generation, m_partitionId, m_signature, sb, false, false);
         delete sb;
@@ -57,14 +57,14 @@ public:
     }
 
     int64_t allocatedByteCount() const {
-        return (m_pendingBlocks.size() * (m_defaultCapacity- MAGIC_HEADER_SPACE_FOR_JAVA)) +
-                ExecutorContext::getExecutorContext()->getTopend()->getQueuedExportBytes( m_partitionId, m_signature);
+        return (m_pendingBlocks.size() * (m_defaultCapacity - m_headerSpace)) +
+                ExecutorContext::getExecutorContext()->getTopend()->getQueuedExportBytes(m_partitionId, m_signature);
     }
 
     void pushExportBuffer(StreamBlock *block, bool sync, bool endOfStream);
 
     /** write a tuple to the stream */
-    size_t appendTuple(int64_t lastCommittedSpHandle,
+    virtual size_t appendTuple(int64_t lastCommittedSpHandle,
                        int64_t spHandle,
                        int64_t seqNo,
                        int64_t uniqueId,

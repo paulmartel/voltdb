@@ -14,12 +14,12 @@
 {@idcol = "ID"}
 
 
-{@insertvals = "_id, _value[string], _value[string null30], _value[float]"}
+{@insertvals = "_id, _value[string null20], _value[string null20], _value[string null20], _value[float]"}
 -- There are no unary string-to-string functions supported yet.
 {@onefun = ""}
 --{@onefun = "LOWER"}
 {@optionalfn = "_stringfun"}
 
-{@updatecolumn = "DESC"}
-{@updatesource = "DESC_INLINE"}
-{@updatevalue = "_value[string]"}
+{@updatecolumn = "VCHAR"}
+{@updatesource = "VCHAR_INLINE"}
+{{@updatevalue = "_value[string]"}

@@ -213,7 +213,22 @@ public enum VoltType {
             null, // unsigned?
             null, // minimum scale
             null, // maximum scale
-            "java.lang.Byte[]"); // getObject return type
+            "java.lang.Byte[]"), // getObject return type
+
+    /**
+     * Boolean type. Not a valid value for actual user data.
+     */
+    BOOLEAN  ((byte)23, 1, "boolean", new Class[] {boolean.class, Boolean.class}, boolean[].class, 'o', //'b' is taken by BIGINT
+            java.sql.Types.BOOLEAN,  // java.sql.Types DATA_TYPE
+            null, // prefix to specify a literal
+            null, // suffix to specify a literal
+            null, // necessary params to create
+            false, // case-sensitive
+            java.sql.DatabaseMetaData.typePredBasic, // where-clauses supported
+            false, // unsigned?
+            0, // minimum scale
+            0, // maximum scale
+            "java.lang.Boolean"); // getObject return type
 
     /**
      * Size in bytes of the maximum length for a VoltDB field value, presumably a
@@ -485,6 +500,15 @@ public enum VoltType {
         return type;
     }
 
+    public static VoltType typeFromSignature(char signature) {
+        for (VoltType type : values()) {
+            if (type.m_signatureChar == signature) {
+                return type;
+            }
+        }
+        throw new VoltTypeException("Unknown type signature: " + signature);
+    }
+
     /**
      * Return the string representation of this type. Note that
      * <tt>VoltType.typeFromString(voltTypeInstance.toString) == true</tt>.
@@ -492,6 +516,10 @@ public enum VoltType {
      */
     @Override public String toString() {
         return "VoltType." + name();
+    }
+
+    public String getName() {
+        return name();
     }
 
     /**
@@ -689,54 +717,36 @@ public enum VoltType {
 
     public static boolean isNullVoltType(Object obj)
     {
-        boolean retval = false;
-        if (obj == null)
+        if ((obj == null) ||
+            (obj == VoltType.NULL_TIMESTAMP) ||
+            (obj == VoltType.NULL_STRING_OR_VARBINARY) ||
+            (obj == VoltType.NULL_DECIMAL))
         {
-            retval = true;
+            return true;
         }
-        else if (obj == VoltType.NULL_TIMESTAMP ||
-                obj == VoltType.NULL_STRING_OR_VARBINARY ||
-                obj == VoltType.NULL_DECIMAL)
+
+        switch(typeFromObject(obj))
         {
-            retval = true;
+        case TINYINT:
+            return (((Number) obj).byteValue() == NULL_TINYINT);
+        case SMALLINT:
+            return (((Number) obj).shortValue() == NULL_SMALLINT);
+        case INTEGER:
+            return (((Number) obj).intValue() == NULL_INTEGER);
+        case BIGINT:
+            return (((Number) obj).longValue() == NULL_BIGINT);
+        case FLOAT:
+            return (((Number) obj).doubleValue() == NULL_FLOAT);
+        case TIMESTAMP:
+        case STRING:
+        case VARBINARY:
+        case DECIMAL:
+            // already checked these above
+            return false;
+        default:
+            throw new VoltTypeException("Unsupported type: " +
+                                        typeFromObject(obj));
         }
-        else
-        {
-            switch(typeFromObject(obj))
-            {
-            case TINYINT:
-                retval = (((Number) obj).byteValue() == NULL_TINYINT);
-                break;
-            case SMALLINT:
-                retval = (((Number) obj).shortValue() == NULL_SMALLINT);
-                break;
-            case INTEGER:
-                retval = (((Number) obj).intValue() == NULL_INTEGER);
-                break;
-            case BIGINT:
-                retval = (((Number) obj).longValue() == NULL_BIGINT);
-                break;
-            case FLOAT:
-                retval = (((Number) obj).doubleValue() == NULL_FLOAT);
-                break;
-            case TIMESTAMP:
-                retval = (obj == VoltType.NULL_TIMESTAMP);
-                break;
-            case STRING:
-                retval = (obj == VoltType.NULL_STRING_OR_VARBINARY);
-                break;
-            case VARBINARY:
-                retval = (obj == VoltType.NULL_STRING_OR_VARBINARY);
-                break;
-            case DECIMAL:
-                retval = (obj == VoltType.NULL_DECIMAL);
-                break;
-            default:
-                throw new VoltTypeException("Unsupported type: " +
-                                            typeFromObject(obj));
-            }
-        }
-        return retval;
     }
 
     /**
@@ -762,7 +772,7 @@ public enum VoltType {
      * <code>INTEGER</code>, <code>BIGINT</code> and <code>TIMESTAMP</code>.
      * @return True if integer type. False if not.
      */
-    public boolean isInteger() {
+    public boolean isBackendIntegerType() {
         switch(this)  {
         case TINYINT:
         case SMALLINT:
@@ -774,6 +784,24 @@ public enum VoltType {
             return false;
         }
     }
+
+    /**
+     * Is this type an integer type? True for <code>TINYINT</code>, <code>SMALLINT</code>,
+     * <code>INTEGER</code>, <code>BIGINT</code>.
+     * @return True if integer type. False if not.
+     */
+    public boolean isAnyIntegerType() {
+        switch(this)  {
+        case TINYINT:
+        case SMALLINT:
+        case INTEGER:
+        case BIGINT:
+            return true;
+        default:
+            return false;
+        }
+    }
+
 
     public boolean isMaxValuePaddable() {
         switch (this) {
@@ -811,6 +839,7 @@ public enum VoltType {
             case INTEGER:
             case BIGINT:
             case FLOAT:
+            case DECIMAL:
                 return true;
             default:
                 return false;
@@ -840,8 +869,8 @@ public enum VoltType {
         if (this == otherType)
             return true;
 
-        if (otherType.isInteger()) {
-            if (this.isInteger()) {
+        if (otherType.isBackendIntegerType()) {
+            if (this.isBackendIntegerType()) {
                 // Don't allow integers getting smaller.
                 return this.getMaxLengthInBytes() >= otherType.getMaxLengthInBytes();
             }

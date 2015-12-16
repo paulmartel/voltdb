@@ -1337,7 +1337,7 @@ public class TableHelper {
         int pkeyColIndex = getBigintPrimaryKeyIndexIfExists(table);
         if (pkeyColIndex == -1) {
             pkeyColIndex = 0;
-            assert(table.getColumnType(0).isInteger());
+            assert(table.getColumnType(0).isBackendIntegerType());
         }
 
         final AtomicLong rss = new AtomicLong(0);
@@ -1419,7 +1419,7 @@ public class TableHelper {
         int pkeyColIndex = getBigintPrimaryKeyIndexIfExists(table);
         if (pkeyColIndex == -1) {
             pkeyColIndex = 0;
-            assert(table.getColumnType(0).isInteger());
+            assert(table.getColumnType(0).isBackendIntegerType());
         }
         String pkeyColName = table.getColumnName(pkeyColIndex);
 
@@ -1489,7 +1489,7 @@ public class TableHelper {
 
         // replicated tables
         if (t.m_extraMetadata.partitionColIndex == -1) {
-            client.callProcedure("@LoadMultipartitionTable", t.m_extraMetadata.name, t);
+            client.callProcedure("@LoadMultipartitionTable", t.m_extraMetadata.name, (byte) 0, t); // using insert here
         }
 
         // partitioned tables

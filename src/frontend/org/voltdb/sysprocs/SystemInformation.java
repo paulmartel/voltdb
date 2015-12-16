@@ -437,6 +437,10 @@ public class SystemInformation extends VoltSystemProcedure
         if (hubAppender != null)
             port = hubAppender.getPort();
         vt.addRow(hostId, "LOG4JPORT", Integer.toString(port));
+        //Add license information
+        if (MiscUtils.isPro()) {
+            vt.addRow(hostId, "LICENSE", VoltDB.instance().getLicenseInformation());
+        }
 
         return vt;
     }
@@ -481,12 +485,14 @@ public class SystemInformation extends VoltSystemProcedure
         }
         results.addRow("snapshotenabled", snap_enabled);
 
-        Connector export_conn = database.getConnectors().get("0");
         String export_enabled = "false";
-        if (export_conn != null && export_conn.getEnabled())
-        {
-            export_enabled = "true";
-            results.addRow("exportoverflowpath", cluster.getExportoverflow());
+        for (Connector export_conn : database.getConnectors()) {
+            if (export_conn != null && export_conn.getEnabled())
+            {
+                export_enabled = "true";
+                results.addRow("exportoverflowpath", cluster.getExportoverflow());
+                break;
+            }
         }
         results.addRow("export", export_enabled);
 

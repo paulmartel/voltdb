@@ -46,13 +46,17 @@
 #ifndef HSTOREEXECUTORUTIL_H
 #define HSTOREEXECUTORUTIL_H
 
-#include "common/types.h"
 #include "executors/abstractexecutor.h"
 #include "plannodes/abstractplannode.h"
 
 namespace voltdb {
+
+class AbstractExecutor;
+class AbstractPlanNode;
 class VoltDBEngine;
+
 AbstractExecutor* getNewExecutor(VoltDBEngine *engine, AbstractPlanNode* abstract_node);
+
 }
 
 #endif

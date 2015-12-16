@@ -57,10 +57,13 @@
 
 #include "boost/foreach.hpp"
 #include "boost/unordered_map.hpp"
+#include "hyperloglog/hyperloglog.hpp" // for APPROX_COUNT_DISTINCT
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <set>
+#include <sstream>
 #include <stdint.h>
 #include <utility>
 
@@ -78,6 +81,12 @@ typedef boost::unordered_set<NValue,
  * It is specified as a parameter class that determines the type of the ifDistinct data member.
  */
 struct Distinct : public AggregateNValueSetType {
+
+    explicit Distinct(Pool* memoryPool)
+        : m_memoryPool(memoryPool)
+    {
+    }
+
     bool excludeValue(const NValue& val)
     {
         // find this value in the set.  If it doesn't exist, add
@@ -86,11 +95,27 @@ struct Distinct : public AggregateNValueSetType {
         iterator setval = find(val);
         if (setval == end())
         {
-            insert(val);
+            if (val.getSourceInlined()) {
+                // We only come here in the case of inlined VARCHAR or
+                // VARBINARY data.  The tuple backing this NValue may
+                // change, so we need to allocate a copy of the data
+                // for the value stored in the unordered set to remain
+                // valid.
+                NValue newval = val;
+                assert(m_memoryPool != NULL);
+                newval.allocateObjectFromInlinedValue(m_memoryPool);
+                insert(newval);
+            }
+            else {
+                insert(val);
+            }
             return false; // Include value just this once.
         }
         return true; // Never again this value;
     }
+
+private:
+    Pool* m_memoryPool;
 };
 
 /**
@@ -99,6 +124,9 @@ struct Distinct : public AggregateNValueSetType {
  * It is specified as a parameter class that determines the type of the ifDistinct data member.
  */
 struct NotDistinct {
+    // Pool argument is provided only so
+    // interface matches Distinct, above.
+    explicit NotDistinct(Pool*) { }
     void clear() { }
     bool excludeValue(const NValue& val)
     {
@@ -111,7 +139,13 @@ template<class D>
 class SumAgg : public Agg
 {
   public:
-    SumAgg() {}
+    // We're providing a NULL pool argument here to ifDistinct because
+    // SUM only operates on numeric values which don't have the same
+    // issues as inlined strings.
+    SumAgg()
+        : ifDistinct(NULL)
+    {
+    }
 
     virtual void advance(const NValue& val)
     {
@@ -143,7 +177,14 @@ template<class D>
 class AvgAgg : public Agg
 {
 public:
-    AvgAgg() : m_count(0) {}
+    // We're providing a NULL pool argument here to ifDistinct because
+    // AVG only operates on numeric values which don't have the same
+    // issues as inlined strings.
+    AvgAgg()
+        : ifDistinct(NULL)
+        , m_count(0)
+    {
+    }
 
     virtual void advance(const NValue& val)
     {
@@ -187,7 +228,11 @@ template<class D>
 class CountAgg : public Agg
 {
 public:
-    CountAgg() : m_count(0) {}
+    CountAgg(Pool* memoryPool)
+        : ifDistinct(memoryPool)
+        , m_count(0)
+    {
+    }
 
     virtual void advance(const NValue& val)
     {
@@ -340,6 +385,127 @@ private:
     Pool* m_memoryPool;
 };
 
+class ApproxCountDistinctAgg : public Agg {
+public:
+    ApproxCountDistinctAgg()
+        : m_hyperLogLog(registerBitWidth())
+    {
+    }
+
+    virtual void advance(const NValue& val)
+    {
+        if (val.isNull()) {
+            return;
+        }
+
+        // Cannot (yet?) handle variable length types.  This should be
+        // enforced by the front end, so we don't actually expect this
+        // error.
+        //
+        // FLOATs are not handled due to the possibility of different
+        // bit patterns representing the same value (positive/negative
+        // zero, and [de-]normalized numbers).  This is also enforced
+        // in the front end.
+        assert(ValuePeeker::peekValueType(val) != VALUE_TYPE_VARCHAR
+               && ValuePeeker::peekValueType(val) != VALUE_TYPE_VARBINARY
+               && ValuePeeker::peekValueType(val) != VALUE_TYPE_DOUBLE);
+
+        int32_t valLength = 0;
+        const char* data = ValuePeeker::peekPointerToDataBytes(val, &valLength);
+        assert(valLength != 0);
+
+        m_hyperLogLog.add(data, static_cast<uint32_t>(valLength));
+    }
+
+    virtual NValue finalize(ValueType type)
+    {
+        double estimate = m_hyperLogLog.estimate();
+        estimate = ::round(estimate); // round to nearest integer
+        m_value = ValueFactory::getBigIntValue(static_cast<int64_t>(estimate));
+        return m_value;
+    }
+
+    virtual void resetAgg()
+    {
+        hyperLogLog().clear();
+        Agg::resetAgg();
+    }
+
+protected:
+    hll::HyperLogLog& hyperLogLog() {
+        return m_hyperLogLog;
+    }
+
+    static uint8_t registerBitWidth() {
+        // Setting this value higher makes for a more accurate
+        // estimate but means that the hyperloglogs sent to the
+        // coordinator from each partition will be larger.
+        //
+        // This value is called "b" in the hyperloglog code
+        // and papers.  Size of the hyperloglog will be
+        // 2^b + 1 bytes.
+        //
+        // For the version of hyperloglog we use in VoltDB, the max
+        // value allowed for b is 16, so the hyperloglogs sent to the
+        // coordinator will be 65537 bytes apiece, which seems
+        // reasonable.
+        return 16;
+    }
+
+private:
+
+    hll::HyperLogLog m_hyperLogLog;
+};
+
+/// When APPROX_COUNT_DISTINCT is split across two fragments of a
+/// plan, this agg represents the bottom half of the agg.  It's
+/// advance method is inherited from the super class, but it's
+/// finalize method produces a serialized hyperloglog to be accepted
+/// by a HYPERLOGLOGS_TO_CARD agg on the coordinator.
+class ValsToHyperLogLogAgg : public ApproxCountDistinctAgg {
+public:
+    virtual NValue finalize(ValueType type)
+    {
+        assert (type == VALUE_TYPE_VARBINARY);
+        // serialize the hyperloglog as varbinary, to send to
+        // coordinator.
+        //
+        // TODO: We're doing a fair bit of copying here, first to the
+        // string stream, then to the temp varbinary object.  We could
+        // get away with just one copy here.
+        std::ostringstream oss;
+        hyperLogLog().dump(oss);
+        return ValueFactory::getTempBinaryValue(oss.str().c_str(),
+                                                static_cast<int32_t>(oss.str().length()));
+    }
+};
+
+/// When APPROX_COUNT_DISTINCT is split across two fragments of a
+/// plan, this agg represents the top half of the agg.  It's finalize
+/// method is inherited from the super class, but it's advance method
+/// accepts serialized hyperloglogs from each partition.
+class HyperLogLogsToCardAgg : public ApproxCountDistinctAgg {
+public:
+    virtual void advance(const NValue& val)
+    {
+        assert (ValuePeeker::peekValueType(val) == VALUE_TYPE_VARBINARY);
+        assert (!val.isNull());
+
+        // TODO: we're doing some unnecessary copying here to
+        // deserialize the hyperloglog and merge it with the
+        // agg's HLL instance.
+
+        int32_t len = ValuePeeker::peekObjectLength_withoutNull(val);
+        char* data = static_cast<char*>(ValuePeeker::peekObjectValue_withoutNull(val));
+        assert (len > 0);
+
+        std::istringstream iss(std::string(data, static_cast<size_t>(len)));
+        hll::HyperLogLog distHll(registerBitWidth());
+        distHll.restore(iss);
+        hyperLogLog().merge(distHll);
+    }
+};
+
 /*
  * Create an instance of an aggregator for the specified aggregate type and "distinct" flag.
  * The object is allocated from the provided memory pool.
@@ -355,9 +521,9 @@ inline Agg* getAggInstance(Pool& memoryPool, ExpressionType agg_type, bool isDis
         return new (memoryPool) MaxAgg(&memoryPool);
     case EXPRESSION_TYPE_AGGREGATE_COUNT:
         if (isDistinct) {
-            return new (memoryPool) CountAgg<Distinct>();
+            return new (memoryPool) CountAgg<Distinct>(&memoryPool);
         }
-        return new (memoryPool) CountAgg<NotDistinct>();
+        return new (memoryPool) CountAgg<NotDistinct>(&memoryPool);
     case EXPRESSION_TYPE_AGGREGATE_SUM:
         if (isDistinct) {
             return new (memoryPool) SumAgg<Distinct>();
@@ -368,6 +534,12 @@ inline Agg* getAggInstance(Pool& memoryPool, ExpressionType agg_type, bool isDis
             return new (memoryPool) AvgAgg<Distinct>();
         }
         return new (memoryPool) AvgAgg<NotDistinct>();
+    case EXPRESSION_TYPE_AGGREGATE_APPROX_COUNT_DISTINCT:
+        return new (memoryPool) ApproxCountDistinctAgg();
+    case EXPRESSION_TYPE_AGGREGATE_VALS_TO_HYPERLOGLOG:
+        return new (memoryPool) ValsToHyperLogLogAgg();
+    case EXPRESSION_TYPE_AGGREGATE_HYPERLOGLOGS_TO_CARD:
+        return new (memoryPool) HyperLogLogsToCardAgg();
     default:
     {
         char message[128];
@@ -472,7 +644,6 @@ inline void AggregateExecutorBase::executeAggBase(const NValueArray& params)
     VOLT_DEBUG("started AGGREGATE");
     assert(dynamic_cast<AggregatePlanNode*>(m_abstractNode));
     assert(m_tmpOutputTable);
-
     //
     // OPTIMIZATION: NESTED LIMIT for serial aggregation
     //

@@ -29,16 +29,18 @@ import java.io.UnsupportedEncodingException;
 import java.net.URL;
 import java.net.URLDecoder;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.NoSuchElementException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import junit.framework.TestCase;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
+import org.hsqldb_voltpatches.HsqlException;
 import org.voltdb.ProcInfoData;
 import org.voltdb.VoltDB.Configuration;
 import org.voltdb.VoltType;
@@ -53,13 +55,15 @@ import org.voltdb.catalog.Group;
 import org.voltdb.catalog.GroupRef;
 import org.voltdb.catalog.Procedure;
 import org.voltdb.catalog.SnapshotSchedule;
-import org.voltdb.catalog.Statement;
 import org.voltdb.catalog.Table;
+import org.voltdb.common.Constants;
 import org.voltdb.compiler.VoltCompiler.Feedback;
 import org.voltdb.compiler.VoltCompiler.VoltCompilerException;
+import org.voltdb.planner.PlanningErrorException;
 import org.voltdb.types.IndexType;
 import org.voltdb.utils.BuildDirectoryUtils;
 import org.voltdb.utils.CatalogUtil;
+import org.voltdb.utils.MiscUtils;
 
 public class TestVoltCompiler extends TestCase {
 
@@ -376,6 +380,48 @@ public class TestVoltCompiler extends TestCase {
         return compiler.m_errors;
     }
 
+    public void testPartitionProcedureWarningMessage() throws IOException {
+        String ddl = "CREATE TABLE PKEY_BIGINT ( PKEY BIGINT NOT NULL, NUM INTEGER, PRIMARY KEY (PKEY) );" +
+                "PARTITION TABLE PKEY_BIGINT ON COLUMN PKEY;" +
+                "create procedure myTestProc as select num from PKEY_BIGINT where pkey = ? order by 1;";
+
+        final File schemaFile = VoltProjectBuilder.writeStringToTempFile(ddl);
+        final String schemaPath = schemaFile.getPath();
+
+        final String simpleProject =
+            "<?xml version=\"1.0\"?>\n" +
+            "<project>" +
+            "<database name='database'>" +
+            "<schemas>" +
+            "<schema path='" + schemaPath + "' />" +
+            "</schemas>" +
+            "</database>" +
+            "</project>";
+
+        final File projectFile = VoltProjectBuilder.writeStringToTempFile(simpleProject);
+        final String projectPath = projectFile.getPath();
+
+        final VoltCompiler compiler = new VoltCompiler();
+
+        final boolean success = compiler.compileWithProjectXML(projectPath, testout_jar);
+        assertTrue(success);
+
+        String expectedWarning =
+                "This procedure myTestProc would benefit from being partitioned, by adding a "
+                + "'PARTITION ON TABLE PKEY_BIGINT COLUMN ON PKEY PARAMETER 0' clause to the "
+                + "CREATE PROCEDURE statement. or using a separate PARTITION PROCEDURE statement";
+
+        boolean findMatched = false;
+        for (Feedback fb : compiler.m_warnings) {
+            System.out.println(fb.getStandardFeedbackLine());
+            if (fb.getStandardFeedbackLine().contains(expectedWarning)) {
+                findMatched = true;
+                break;
+            }
+        }
+        assertTrue(findMatched);
+    }
+
     public void testSnapshotSettings() throws IOException {
         String schemaPath = "";
         try {
@@ -429,7 +475,7 @@ public class TestVoltCompiler extends TestCase {
             cat.execute(catalogContents);
 
             Connector connector = cat.getClusters().get("cluster").getDatabases().
-                get("database").getConnectors().get("0");
+                get("database").getConnectors().get(Constants.DEFAULT_EXPORT_CONNECTOR_NAME);
             assertFalse(connector.getEnabled());
 
         } finally {
@@ -441,6 +487,8 @@ public class TestVoltCompiler extends TestCase {
 
     // test that Export configuration is insensitive to the case of the table name
     public void testExportTableCase() throws IOException {
+        if (!MiscUtils.isPro()) { return; } // not supported in community
+
         final VoltProjectBuilder project = new VoltProjectBuilder();
         project.addSchema(TestVoltCompiler.class.getResource("ExportTester-ddl.sql"));
         project.addStmtProcedure("Dummy", "insert into a values (?, ?, ?);",
@@ -462,7 +510,7 @@ public class TestVoltCompiler extends TestCase {
             cat.execute(catalogContents);
             CatalogUtil.compileDeployment(cat, project.getPathToDeployment(), false);
             Connector connector = cat.getClusters().get("cluster").getDatabases().
-                get("database").getConnectors().get("0");
+                get("database").getConnectors().get(Constants.DEFAULT_EXPORT_CONNECTOR_NAME);
             assertTrue(connector.getEnabled());
             // Assert that all tables exist in the connector section of catalog
             assertNotNull(connector.getTableinfo().getIgnoreCase("a"));
@@ -1291,6 +1339,108 @@ public class TestVoltCompiler extends TestCase {
         assertTrue(success);
     }
 
+    public void testCreateProcedureWithPartition() throws IOException {
+        class Tester {
+            final VoltCompiler compiler = new VoltCompiler();
+            final String baseDDL =
+                "create table books (cash integer default 23 not null, "
+                                  + "title varchar(3) default 'foo', "
+                                  + "primary key(cash));\n"
+              + "partition table books on column cash";
+
+            void test(String ddl) {
+                test(ddl, null);
+            }
+
+            void test(String ddl, String expectedError) {
+                final String schema = String.format("%s;\n%s;", baseDDL, ddl);
+                boolean success = compileDDL(schema, compiler);
+                checkCompilerErrorMessages(expectedError, compiler, success);
+            }
+        }
+        Tester tester = new Tester();
+
+        // Class proc
+        tester.test("create procedure "
+                  + "partition on table books column cash "
+                  + "from class org.voltdb.compiler.procedures.NotAnnotatedAddBook");
+
+        // Class proc with previously-defined partition properties (expect error)
+        tester.test("create procedure "
+                  + "partition on table books column cash "
+                  + "from class org.voltdb.compiler.procedures.AddBook",
+                    "has partition properties defined both in class");
+
+        // Class proc with ALLOW before PARTITION clause
+        tester.test("create role r1;\n"
+                  + "create procedure "
+                  + "allow r1 "
+                  + "partition on table books column cash "
+                  + "from class org.voltdb.compiler.procedures.NotAnnotatedAddBook");
+
+        // Class proc with ALLOW after PARTITION clause
+        tester.test("create role r1;\n"
+                  + "create procedure "
+                  + "partition on table books column cash "
+                  + "allow r1 "
+                  + "from class org.voltdb.compiler.procedures.NotAnnotatedAddBook");
+
+        // Statement proc
+        tester.test("create procedure Foo "
+                  + "PARTITION on table books COLUMN cash PARAMETER 0 "
+                  + "AS select * from books where cash = ?");
+
+        // Statement proc with ALLOW before PARTITION clause
+        tester.test("create role r1;\n"
+                  + "create procedure Foo "
+                  + "allow r1 "
+                  + "PARTITION on table books COLUMN cash PARAMETER 0 "
+                  + "AS select * from books where cash = ?");
+
+        // Statement proc with ALLOW after PARTITION clause
+        tester.test("create role r1;\n"
+                  + "create procedure Foo "
+                  + "PARTITION on table books COLUMN cash PARAMETER 0 "
+                  + "allow r1 "
+                  + "AS select * from books where cash = ?");
+
+        // Inspired by a problem with fullDDL.sql
+        tester.test(
+                "create role admin;\n" +
+                "CREATE TABLE T26 (age BIGINT NOT NULL, gender TINYINT);\n" +
+                "PARTITION TABLE T26 ON COLUMN age;\n" +
+                "CREATE TABLE T26a (age BIGINT NOT NULL, gender TINYINT);\n" +
+                "PARTITION TABLE T26a ON COLUMN age;\n" +
+                "CREATE PROCEDURE p4 ALLOW admin PARTITION ON TABLE T26 COLUMN age PARAMETER 0 AS SELECT COUNT(*) FROM T26 WHERE age = ?;\n" +
+                "CREATE PROCEDURE PARTITION ON TABLE T26a COLUMN age ALLOW admin FROM CLASS org.voltdb_testprocs.fullddlfeatures.testCreateProcFromClassProc");
+
+        // Inline code proc
+        tester.test("CREATE TABLE PKEY_INTEGER ( PKEY INTEGER NOT NULL, DESCR VARCHAR(128), PRIMARY KEY (PKEY) );" +
+                    "PARTITION TABLE PKEY_INTEGER ON COLUMN PKEY;" +
+                    "CREATE PROCEDURE Foo PARTITION ON TABLE PKEY_INTEGER COLUMN PKEY AS ###\n" +
+                    "    stmt = new SQLStmt('SELECT PKEY, DESCR FROM PKEY_INTEGER WHERE PKEY = ?')\n" +
+                    "    transactOn = { int key -> \n" +
+                    "        voltQueueSQL(stmt,key)\n" +
+                    "        voltExecuteSQL(true)\n" +
+                    "    }\n" +
+                    "### LANGUAGE GROOVY");
+
+        // Class proc with two PARTITION clauses (inner regex failure causes specific error)
+        tester.test("create procedure "
+                  + "partition on table books column cash "
+                  + "partition on table books column cash "
+                  + "from class org.voltdb.compiler.procedures.NotAnnotatedAddBook",
+                    "Only one PARTITION clause is allowed for CREATE PROCEDURE");
+
+        // Class proc with two ALLOW clauses (should work)
+        tester.test("create role r1;\n"
+                  + "create role r2;\n"
+                  + "create procedure "
+                  + "allow r1 "
+                  + "allow r2 "
+                  + "from class org.voltdb.compiler.procedures.AddBook");
+    }
+
     public void testUseInnerClassAsProc() throws Exception {
         final String simpleSchema =
             "create procedure from class org.voltdb_testprocs.regressionsuites.fixedsql.TestENG2423$InnerProc;";
@@ -1759,7 +1909,8 @@ public class TestVoltCompiler extends TestCase {
         final String s =
                 "create table t(id integer not null, num integer not null);\n" +
                 "create unique index idx_ft_unique on t(abs(id+num));\n" +
-                "create index idx_ft on t(abs(num));";
+                "create index idx_ft on t(abs(num));\n" +
+                "create index poweridx on t(power(id, 2));";
         VoltCompiler c = compileForDDLTest(getPathForSchema(s), true);
         assertFalse(c.hasErrors());
         Database d = c.m_catalog.getClusters().get("cluster").getDatabases().get("database");
@@ -1791,12 +1942,44 @@ public class TestVoltCompiler extends TestCase {
 
     public void testDDLCompilerTwoIdenticalIndexes()
     {
-        final String s =
-                "create table t(id integer not null, num integer not null);\n" +
-                "create index idx_t_idnum1 on t(id,num);\n" +
-                "create index idx_t_idnum2 on t(id,num);";
+        String s;
+        VoltCompiler c;
+        s = "create table t(id integer not null, num integer not null);\n" +
+            "create index idx_t_idnum1 on t(id,num);\n" +
+            "create index idx_t_idnum2 on t(id,num);";
+        c = compileForDDLTest(getPathForSchema(s), true);
+        assertFalse(c.hasErrors());
+        assertTrue(c.hasErrorsOrWarnings());
 
-        VoltCompiler c = compileForDDLTest(getPathForSchema(s), true);
+        // non-unique partial index
+        s = "create table t(id integer not null, num integer not null);\n" +
+            "create index idx_t_idnum1 on t(id) where num > 3;\n" +
+            "create index idx_t_idnum2 on t(id) where num > 3;";
+        c = compileForDDLTest(getPathForSchema(s), true);
+        assertFalse(c.hasErrors());
+        assertTrue(c.hasErrorsOrWarnings());
+
+        // unique partial index
+        s = "create table t(id integer not null, num integer not null);\n" +
+            "create unique index idx_t_idnum1 on t(id) where num > 3;\n" +
+            "create unique index idx_t_idnum2 on t(id) where num > 3;";
+        c = compileForDDLTest(getPathForSchema(s), true);
+        assertFalse(c.hasErrors());
+        assertTrue(c.hasErrorsOrWarnings());
+
+        // non-unique expression partial index
+        s = "create table t(id integer not null, num integer not null);\n" +
+            "create index idx_t_idnum1 on t(id) where abs(num) > 3;\n" +
+            "create index idx_t_idnum2 on t(id) where abs(num) > 3;";
+        c = compileForDDLTest(getPathForSchema(s), true);
+        assertFalse(c.hasErrors());
+        assertTrue(c.hasErrorsOrWarnings());
+
+        // unique expression partial index
+        s = "create table t(id integer not null, num integer not null);\n" +
+            "create unique index idx_t_idnum1 on t(id) where abs(num) > 3;\n" +
+            "create unique index idx_t_idnum2 on t(id) where abs(num) > 3;";
+        c = compileForDDLTest(getPathForSchema(s), true);
         assertFalse(c.hasErrors());
         assertTrue(c.hasErrorsOrWarnings());
     }
@@ -1836,13 +2019,15 @@ public class TestVoltCompiler extends TestCase {
         assertEquals(false, c.hasErrorsOrWarnings());
     }
 
-    public void testDDLCompilerDropOneOfThreeIndexes()
+    public void testDDLCompilerDropTwoOfFiveIndexes()
     {
         final String s =
                 "create table t(id integer not null, num integer not null);\n" +
                 "create index idx_t_idnum_a on t(num,id);\n" +
                 "create index idx_t_idnum_b on t(id,num);\n" +
-                "create index idx_t_idnum_c on t(id,num);\n";
+                "create index idx_t_idnum_c on t(id,num);\n" +
+                "create index idx_t_idnum_d on t(id,num) where id > 0;\n" +
+                "create index idx_t_idnum_f on t(id,num) where id > 0;\n";
 
         final VoltCompiler c = compileForDDLTest(getPathForSchema(s), true);
         assertEquals(true, c.hasErrorsOrWarnings());
@@ -1852,7 +2037,7 @@ public class TestVoltCompiler extends TestCase {
                 foundCount++;
             }
         }
-        assertEquals(1, foundCount);
+        assertEquals(2, foundCount);
     }
 
     public void testDDLCompilerUniqueAndNonUniqueIndexOnSameColumns()
@@ -1879,7 +2064,7 @@ public class TestVoltCompiler extends TestCase {
     {
         // Test indexes.
         String ddl = "";
-        String errorIndexMsg = "Index IDX_T_TM cannot include the function NOW or CURRENT_TIMESTAMP.";
+        String errorIndexMsg = "Index \"IDX_T_TM\" cannot include the function NOW or CURRENT_TIMESTAMP.";
         ddl = "create table t(id integer not null, tm timestamp);\n" +
               "create index idx_t_tm on t(since_epoch(second, CURRENT_TIMESTAMP) - since_epoch(second, tm));";
         checkDDLErrorMessage(ddl, errorIndexMsg);
@@ -1917,6 +2102,101 @@ public class TestVoltCompiler extends TestCase {
                 "where since_epoch(second, CURRENT_TIMESTAMP) - since_epoch(second, tm) > 60 " +
                 "group by tm;";
         checkDDLErrorMessage(ddl, errorMatviewMsg);
+    }
+
+    public void testDDLCompilerCreateAndDropIndexesOnMatView()
+    {
+        String ddl = "";
+
+        ddl = "create table foo(a integer, b float, c float);\n" +
+              "create view bar (a, b, total) as select a, b, count(*) as total from foo group by a, b;\n" +
+              "create index baridx on bar (a);\n" +
+              "drop index baridx;\n";
+        checkDDLErrorMessage(ddl, null);
+
+        ddl = "create table foo(a integer, b float);\n" +
+              "create view bar (a, total) as select a, count(*) as total from foo group by a;\n" +
+              "create index baridx on bar (a, total);\n" +
+              "drop index baridx;\n";
+        checkDDLErrorMessage(ddl, null);
+    }
+
+    public void testColumnNameIndexHash()
+    {
+        List<Pair<String, IndexType>> passing
+            = Arrays.asList(
+                            // If we don't explicitly name the primary key constraint,
+                            // we always get a tree index.  This is independent of the name
+                            // of the index column or columns.
+                            Pair.of("create table t ( goodhashname varchar(256) not null, primary key ( goodhashname ) );",
+                                    IndexType.BALANCED_TREE),
+                            Pair.of("create table t ( goodhashname integer not null, primary key ( goodhashname ) );",
+                                    IndexType.BALANCED_TREE),
+                            Pair.of("create table t ( goodtreename varchar(256) not null, primary key ( goodtreename ) );",
+                                    IndexType.BALANCED_TREE),
+                            Pair.of("create table t ( goodtreename integer not null, primary key ( goodtreename ) );",
+                                    IndexType.BALANCED_TREE),
+                            Pair.of("create table t ( goodtreehashname varchar(256) not null, primary key (goodtreehashname));",
+                                    IndexType.BALANCED_TREE),
+                            Pair.of("create table t ( goodtreehashname integer not null, primary key (goodtreehashname));",
+                                    IndexType.BALANCED_TREE),
+                            // If we explicitly name the constraint with a tree name
+                            // we always get a tree index.  This is true even if the
+                            // column type is hashable.
+                            Pair.of("create table t ( goodtreehashname varchar(256) not null, constraint good_tree primary key (goodtreehashname));",
+                                    IndexType.BALANCED_TREE),
+                            Pair.of("create table t ( goodtreehashname integer not null, constraint good_tree primary key (goodtreehashname));",
+                                    IndexType.BALANCED_TREE),
+                            // If we explicitly name the constraint with a name
+                            // which is both a hash name and a tree name, we always get a tree
+                            // index.  This is true even if the column type is hashable.
+                            Pair.of("create table t ( goodtreehashname varchar(256) not null, constraint good_tree primary key (goodtreehashname));",
+                                    IndexType.BALANCED_TREE),
+                            Pair.of("create table t ( goodtreehashname integer not null, constraint good_tree primary key (goodtreehashname));",
+                                    IndexType.BALANCED_TREE),
+
+                            // The only way to get a hash index is to explicitly name the constraint
+                            // with a hash name and to make the column type or types be hashable.
+                            Pair.of("create table t ( goodtreehashname integer not null, constraint good_hash primary key (goodtreehashname));",
+                                    IndexType.HASH_TABLE),
+                            Pair.of("create table t ( goodvanilla integer not null, constraint good_hash_constraint primary key ( goodvanilla ) );",
+                                    IndexType.HASH_TABLE),
+                            // Test to see if created indices are still hashed
+                            // when they are expected, and not hashed when they
+                            // are not expected.
+                            Pair.of("create table t ( goodvanilla integer not null ); create unique index myhash on t ( goodvanilla );",
+                                    IndexType.HASH_TABLE),
+                            Pair.of("create table t ( goodhash integer not null primary key );",
+                                    IndexType.BALANCED_TREE)
+        );
+        String[] failing
+            = {
+                // If we name the constraint with a hash name,
+                // but the column type is not hashable, it is an
+                // error.
+                "create table t ( badhashname varchar(256) not null, constraint badhashconstraint primary key ( badhashname ) );",
+                // The name of the column is not important.
+                "create table t ( badzotzname varchar(256) not null, constraint badhashconstraint primary key ( badzotzname ) );",
+                // If any of the columns are non-hashable, the index is
+                // not hashable.
+                "create table t ( fld1 integer, fld2 varchar(256), constraint badhashconstraint primary key ( fld1, fld2 ) );"
+        };
+        for (Pair<String, IndexType> cmdPair : passing) {
+            // See if we can actually create the table.
+            VoltCompiler c = compileForDDLTest(getPathForSchema(cmdPair.getLeft()), true);
+            Database d = c.m_catalog.getClusters().get("cluster").getDatabases().get("database");
+            assertEquals(1, d.getTables().getIgnoreCase("t").getIndexes().size());
+            org.voltdb.catalog.Index idx = d.getTables().getIgnoreCase("t").getIndexes().iterator().next();
+            String msg = String.format("CMD: %s\nExpected %s, got %s",
+                                       cmdPair.getLeft(),
+                                       cmdPair.getRight(),
+                                       IndexType.get(idx.getType()));
+            assertEquals(msg, cmdPair.getRight().getValue(),
+                         idx.getType());
+        }
+        for (String cmd : failing) {
+            compileForDDLTest(getPathForSchema(cmd), false);
+        }
     }
 
     private static final String msgP = "does not include the partitioning column";
@@ -2161,6 +2441,11 @@ public class TestVoltCompiler extends TestCase {
                 "as select num, count(*) from (select num from t) subt group by num; \n";
         checkDDLErrorMessage(ddl, "Materialized view \"MY_VIEW1\" with subquery sources is not supported.");
 
+        ddl = "create table t(id integer not null, num integer, wage integer);\n" +
+                "create view my_view1 (num, total) " +
+                "as select num, count(*) from t where id in (select id from t) group by num; \n";
+        checkDDLErrorMessage(ddl, "Materialized view \"MY_VIEW1\" with subquery sources is not supported.");
+
         ddl = "create table t1(id integer not null, num integer, wage integer);\n" +
                 "create table t2(id integer not null, num integer, wage integer);\n" +
                 "create view my_view1 (id, num, total) " +
@@ -2194,8 +2479,38 @@ public class TestVoltCompiler extends TestCase {
         checkDDLErrorMessage(ddl, "Materialized view \"MY_VIEW\" with LIMIT or OFFSET clause is not supported.");
 
         ddl = "create table t(id integer not null, num integer);\n" +
+                "create view my_view as select num, count(*) from t group by num offset 10;";
+        checkDDLErrorMessage(ddl, "Materialized view \"MY_VIEW\" with LIMIT or OFFSET clause is not supported.");
+
+        ddl = "create table t(id integer not null, num integer);\n" +
                 "create view my_view as select num, count(*) from t group by num having count(*) > 3;";
         checkDDLErrorMessage(ddl, "Materialized view \"MY_VIEW\" with HAVING clause is not supported.");
+
+        String errorMsg = "In database, the materialized view is automatically "
+                + "partitioned based on its source table. Invalid PARTITION statement on view table MY_VIEW.";
+
+        ddl = "create table t(id integer not null, num integer not null);\n" +
+                "partition table t on column num;\n" +
+                "create view my_view as select num, count(*) from t group by num;\n" +
+                "partition table my_view on column num;";
+        checkDDLErrorMessage(ddl, errorMsg);
+
+        ddl = "create table t(id integer not null, num integer not null);\n" +
+                "partition table t on column num;" +
+                "create view my_view as select num, count(*) as ct from t group by num;" +
+                "partition table my_view on column ct;";
+        checkDDLErrorMessage(ddl, errorMsg);
+
+        ddl = "create table t(id integer not null, num integer not null);\n" +
+                "create view my_view as select num, count(*) from t group by num;" +
+                "partition table my_view on column num;";
+        checkDDLErrorMessage(ddl, errorMsg);
+
+        // approx_count_distinct is not a supported aggregate function for materialized views.
+        errorMsg = "Materialized view \"MY_VIEW\" must have non-group by columns aggregated by sum, count, min or max.";
+        ddl = "create table t(id integer not null, num integer not null);\n" +
+                "create view my_view as select id, count(*), approx_count_distinct(num) from t group by id;";
+        checkDDLErrorMessage(ddl, errorMsg);
     }
 
     public void testDDLCompilerTableLimit()
@@ -2357,29 +2672,28 @@ public class TestVoltCompiler extends TestCase {
                 assertEquals(Integer.MAX_VALUE, tbl.getTuplelimit());
             }
 
-            Statement stmt = null;
-            try {
-                stmt = tbl.getTuplelimitdeletestmt().iterator().next();
-            }
-            catch (NoSuchElementException nse) {
-            }
+            String stmt = CatalogUtil.getLimitPartitionRowsDeleteStmt(tbl);
 
             if (expectedStmt == null) {
                 assertTrue("Did not expect to find a LIMIT DELETE statement, but found this one:\n"
-                        + (stmt != null ? stmt.getSqltext() : ""),
+                        + (stmt != null ? stmt : ""),
                         stmt == null);
             } else {
                 // Make sure we have the delete statement that we expected
                 assertTrue("Expected to find LIMIT DELETE statement, found none", stmt != null);
 
-                String sql = stmt.getSqltext();
-                if (sql.endsWith(";")) {
+                if (stmt.endsWith(";")) {
                     // We seem to add a semicolon somewhere.  I guess that's okay.
-                    sql = sql.substring(0, sql.length() - 1);
+                    stmt = stmt.substring(0, stmt.length() - 1);
                 }
 
+                // Remove spaces from both strings so we compare whitespace insensitively
+                // Capturing the DELETE statement in HSQL does not preserve whitespace.
+                expectedStmt = stmt.replace(" ", "");
+                stmt = stmt.replace(" ", "");
+
                 assertEquals("Did not find the LIMIT DELETE statement that we expected",
-                        expectedStmt, sql);
+                        expectedStmt, stmt);
             }
         }
     }
@@ -2570,7 +2884,7 @@ public class TestVoltCompiler extends TestCase {
                 "PARTITION TABLE PKEY_INTEGER ON COLUMN PKEY;" +
                 "PARTITION PROCEDURE NotDefinedPartitionParamInteger ON TABLE PKEY_INTEGER COLUMN PKEY;"
                 );
-        expectedError = "Partition in referencing an undefined procedure \"NotDefinedPartitionParamInteger\"";
+        expectedError = "Partition references an undefined procedure \"NotDefinedPartitionParamInteger\"";
         assertTrue(isFeedbackPresent(expectedError, fbs));
 
         fbs = checkInvalidProcedureDDL(
@@ -2837,15 +3151,6 @@ public class TestVoltCompiler extends TestCase {
         fbs = checkInvalidProcedureDDL(
                 "CREATE TABLE PKEY_INTEGER ( PKEY INTEGER NOT NULL, DESCR VARCHAR(128), PRIMARY KEY (PKEY) );" +
                 "PARTITION TABLE PKEY_INTEGER ON COLUMN PKEY;" +
-                "CREATE PROCEDURE org.kanamuri.Foo AS DELETE FROM PKEY_INTEGER;" +
-                "PARTITION PROCEDURE Foo ON TABLE PKEY_INTEGER COLUMN PKEY;"
-                );
-        expectedError = "PartitionInfo specifies invalid parameter index for procedure: org.kanamuri.Foo";
-        assertTrue(isFeedbackPresent(expectedError, fbs));
-
-        fbs = checkInvalidProcedureDDL(
-                "CREATE TABLE PKEY_INTEGER ( PKEY INTEGER NOT NULL, DESCR VARCHAR(128), PRIMARY KEY (PKEY) );" +
-                "PARTITION TABLE PKEY_INTEGER ON COLUMN PKEY;" +
                 "CREATE PROCEDURE 7Foo AS DELETE FROM PKEY_INTEGER WHERE PKEY = ?;" +
                 "PARTITION PROCEDURE 7Foo ON TABLE PKEY_INTEGER COLUMN PKEY;"
                 );
@@ -2855,7 +3160,7 @@ public class TestVoltCompiler extends TestCase {
         assertTrue(isFeedbackPresent(expectedError, fbs));
     }
 
-    public void testInvalidGtroovyProcedureDDL() throws Exception {
+    public void testInvalidGroovyProcedureDDL() throws Exception {
         ArrayList<Feedback> fbs;
         String expectedError;
 
@@ -2994,7 +3299,7 @@ public class TestVoltCompiler extends TestCase {
                 "### LANGUAGE KROOVY;\n" +
                 "PARTITION PROCEDURE Foo ON TABLE PKEY_INTEGER COLUMN PKEY;"
                 );
-        expectedError = "### LANGUAGE KROOVY\", expected syntax: \"CREATE PROCEDURE [ALLOW";
+        expectedError = "Language \"KROOVY\" is not a supported";
         assertTrue(isFeedbackPresent(expectedError, fbs));
     }
 
@@ -3383,9 +3688,14 @@ public class TestVoltCompiler extends TestCase {
     }
 
     private Database checkDDLAgainstSimpleSchema(String errorRegex, String... ddl) throws Exception {
+        final String simpleSchema = "create table books (cash integer default 23 NOT NULL, title varbinary(10) default NULL, PRIMARY KEY(cash)); " +
+                                         "partition table books on column cash;";
+        return checkDDLAgainstGivenSchema(errorRegex, simpleSchema, ddl);
+    }
+
+    private Database checkDDLAgainstGivenSchema(String errorRegex, String givenSchema, String... ddl) throws Exception {
         String schemaDDL =
-            "create table books (cash integer default 23 NOT NULL, title varbinary(10) default NULL, PRIMARY KEY(cash)); " +
-            "partition table books on column cash;" +
+            givenSchema +
             StringUtils.join(ddl, " ");
 
         File schemaFile = VoltProjectBuilder.writeStringToTempFile(schemaDDL.toString());
@@ -3403,18 +3713,33 @@ public class TestVoltCompiler extends TestCase {
         String projectPath = projectFile.getPath();
 
         VoltCompiler compiler = new VoltCompiler();
-
-        boolean success = compiler.compileWithProjectXML(projectPath, testout_jar);
-        String error = (success || compiler.m_errors.size() == 0
+        boolean success;
+        String error;
+        try {
+            success = compiler.compileWithProjectXML(projectPath, testout_jar);
+            error = (success || compiler.m_errors.size() == 0
                 ? ""
                 : compiler.m_errors.get(compiler.m_errors.size()-1).message);
+        } catch (HsqlException hex) {
+            success = false;
+            error = hex.getMessage();
+        } catch (PlanningErrorException plex) {
+            success = false;
+            error = plex.getMessage();
+        }
         if (errorRegex == null) {
-            assertTrue(String.format("Expected success\nDDL: %s\n%s", ddl, error), success);
+            assertTrue(String.format("Expected success\nDDL: %s\n%s",
+                                     StringUtils.join(ddl, " "),
+                                     error),
+                       success);
             Catalog cat = compiler.getCatalog();
             return cat.getClusters().get("cluster").getDatabases().get("database");
         }
         else {
-            assertFalse(String.format("Expected error (\"%s\")\nDDL: %s", errorRegex, ddl), success);
+            assertFalse(String.format("Expected error (\"%s\")\nDDL: %s",
+                                      errorRegex,
+                                      StringUtils.join(ddl, " ")),
+                        success);
             assertFalse("Expected at least one error message.", error.isEmpty());
             Matcher m = Pattern.compile(errorRegex).matcher(error);
             assertTrue(String.format("%s\nEXPECTED: %s", error, errorRegex), m.matches());
@@ -3486,9 +3811,9 @@ public class TestVoltCompiler extends TestCase {
                 "create procedure p1 allow as select * from books;");
         badDDLAgainstSimpleSchema(".*expected syntax.*",
                 "create procedure p1 allow a b as select * from books;");
-        badDDLAgainstSimpleSchema(".*group rx that does not exist.*",
+        badDDLAgainstSimpleSchema(".*role rx that does not exist.*",
                 "create procedure p1 allow rx as select * from books;");
-        badDDLAgainstSimpleSchema(".*group rx that does not exist.*",
+        badDDLAgainstSimpleSchema(".*role rx that does not exist.*",
                 "create role r1;",
                 "create procedure p1 allow r1, rx as select * from books;");
     }
@@ -3530,8 +3855,40 @@ public class TestVoltCompiler extends TestCase {
                 "drop role user;");
     }
 
+    public void testDDLPartialIndex()
+    {
+        final String s =
+                "create table t(id integer not null, num integer not null);\n" +
+                "create unique index idx_t_idnum on t(id) where id > 4;\n";
+
+        VoltCompiler c = compileForDDLTest(getPathForSchema(s), true);
+        assertFalse(c.hasErrors());
+    }
+
+    public void testInvalidPartialIndex()
+    {
+        String ddl = null;
+        ddl =
+                "create table t(id integer not null, num integer not null);\n" +
+                "create unique index IDX_T_IDNUM on t(id) where max(id) > 4;\n";
+
+        checkDDLErrorMessage(ddl, "Partial index \"IDX_T_IDNUM\" with aggregate expression(s) is not supported.");
+
+        ddl =
+                "create table t1(id integer not null, num integer not null);\n" +
+                "create table t2(id integer not null, num integer not null);\n" +
+                "create unique index IDX_T1_IDNUM on t1(id) where t2.id > 4;\n";
+
+        checkDDLErrorMessage(ddl, "Partial index \"IDX_T1_IDNUM\" with expression(s) involving other tables is not supported.");
+
+        ddl =
+                "create table t(id integer not null, num integer not null);\n" +
+                "create unique index IDX_T_IDNUM on t(id) where id in (select num from t);\n";
+        checkDDLErrorMessage(ddl, "Partial index \"IDX_T_IDNUM\" with subquery expression(s) is not supported.");
+}
+
     private ConnectorTableInfo getConnectorTableInfoFor( Database db, String tableName) {
-        Connector connector =  db.getConnectors().get("0");
+        Connector connector =  db.getConnectors().get(Constants.DEFAULT_EXPORT_CONNECTOR_NAME);
         if( connector == null) return null;
         return connector.getTableinfo().getIgnoreCase(tableName);
     }
@@ -3594,6 +3951,66 @@ public class TestVoltCompiler extends TestCase {
                 );
     }
 
+    public void testGoodDRTable() throws Exception {
+        Database db;
+
+        db = goodDDLAgainstSimpleSchema(
+                "create table e1 (id integer not null, f1 varchar(16));",
+                "partition table e1 on column id;",
+                "dr table e1;"
+                );
+        assertTrue(db.getTables().getIgnoreCase("e1").getIsdred());
+
+        String schema = "create table e1 (id integer not null, f1 varchar(16));\n" +
+                        "create table e2 (id integer not null, f1 varchar(16));\n" +
+                        "partition table e1 on column id;";
+
+        db = goodDDLAgainstSimpleSchema(
+                schema,
+                "dr table e1;",
+                "DR TABLE E2;"
+                );
+        assertTrue(db.getTables().getIgnoreCase("e1").getIsdred());
+        assertTrue(db.getTables().getIgnoreCase("e2").getIsdred());
+
+        // DR statement is order sensitive
+        db = goodDDLAgainstSimpleSchema(
+                schema,
+                "dr table e2;",
+                "dr table e2 disable;"
+                );
+        assertFalse(db.getTables().getIgnoreCase("e2").getIsdred());
+
+        db = goodDDLAgainstSimpleSchema(
+                schema,
+                "dr table e2 disable;",
+                "dr table e2;"
+                );
+        assertTrue(db.getTables().getIgnoreCase("e2").getIsdred());
+    }
+
+    public void testBadDRTable() throws Exception {
+        badDDLAgainstSimpleSchema(".+\\sdr, table non_existant was not present in the catalog.*",
+                "dr table non_existant;"
+                );
+
+        badDDLAgainstSimpleSchema(".+contains invalid identifier \"1table_name_not_valid\".*",
+                "dr table 1table_name_not_valid;"
+                );
+
+        badDDLAgainstSimpleSchema(".+Invalid DR TABLE statement.*",
+                "dr table one, two, three;"
+                );
+
+        badDDLAgainstSimpleSchema(".+Invalid DR TABLE statement.*",
+                "dr dr table one;"
+                );
+
+        badDDLAgainstSimpleSchema(".+Invalid DR TABLE statement.*",
+                "dr table table one;"
+                );
+    }
+
     public void testCompileFromDDL() throws IOException {
         final String simpleSchema1 =
             "create table table1r_el  (pkey integer, column2_integer integer, PRIMARY KEY(pkey));\n" +
@@ -3621,6 +4038,118 @@ public class TestVoltCompiler extends TestCase {
 
         success = compileFromDDL(compiler, testout_jar);
         assertFalse(success);
+    }
+
+    public void testDDLStmtProcNameWithDots() throws Exception
+    {
+        final File ddlFile = VoltProjectBuilder.writeStringToTempFile(StringUtils.join(new String[] {
+            "create table books (cash integer default 23 not null, title varchar(10) default 'foo', PRIMARY KEY(cash));",
+            "create procedure a.Foo as select * from books;"
+        }, "\n"));
+
+        final VoltCompiler compiler = new VoltCompiler();
+        assertFalse("Compile with dotted proc name should fail",
+                    compiler.compileFromDDL(testout_jar, ddlFile.getPath()));
+        assertTrue("Compile with dotted proc name did not have the expected error message",
+                   isFeedbackPresent("Invalid procedure name", compiler.m_errors));
+    }
+
+
+    /*
+     * Test some ddl with a schema tailored for illegal scalar subqueries.
+     */
+    private Database checkDDLAgainstScalarSubquerySchema(String errorRegex, String... ddl) throws Exception {
+        String scalarSubquerySchema = "create table books (cash integer default 23 NOT NULL, title varchar(10) default NULL, PRIMARY KEY(cash)); " +
+                                         "partition table books on column cash;";
+        return checkDDLAgainstGivenSchema(errorRegex, scalarSubquerySchema, ddl);
+    }
+
+    /**
+     * Test to see if scalar subqueries are either allowed where we
+     * expect them to be or else cause compilation errors where we
+     * don't expect them to be.
+     *
+     * @throws Exception
+     */
+    public void testScalarSubqueriesExpectedFailures() throws Exception {
+        // Scalar subquery not allowed in partial indices.
+        checkDDLAgainstScalarSubquerySchema(null, "create table mumble ( ID integer ); \n");
+        checkDDLAgainstScalarSubquerySchema("Partial index \"BIDX\" with subquery expression\\(s\\) is not supported.",
+                                    "create index bidx on books ( title ) where exists ( select title from books as child where books.cash = child.cash ) ;\n");
+        checkDDLAgainstScalarSubquerySchema("Partial index \"BIDX\" with subquery expression\\(s\\) is not supported.",
+                                    "create index bidx on books ( title ) where 7 < ( select cash from books as child where books.title = child.title ) ;\n");
+        checkDDLAgainstScalarSubquerySchema("Partial index \"BIDX\" with subquery expression\\(s\\) is not supported.",
+                                    "create index bidx on books ( title ) where 'ossians ride' < ( select title from books as child where books.cash = child.cash ) ;\n");
+        // Scalar subquery not allowed in indices.
+        checkDDLAgainstScalarSubquerySchema("DDL Error: \"unexpected token: SELECT\" in statement starting on lineno: [0-9]*",
+                                    "create index bidx on books ( select title from books as child where child.cash = books.cash );");
+        checkDDLAgainstScalarSubquerySchema("Index \"BIDX1\" with subquery sources is not supported.",
+                                    "create index bidx1 on books ( ( select title from books as child where child.cash = books.cash ) ) ;");
+        checkDDLAgainstScalarSubquerySchema("Index \"BIDX2\" with subquery sources is not supported.",
+                                    "create index bidx2 on books ( cash + ( select cash from books as child where child.title < books.title ) );");
+        // Scalar subquery not allowed in materialize views.
+        checkDDLAgainstScalarSubquerySchema("Materialized view \"TVIEW\" with subquery sources is not supported.",
+                                    "create view tview as select cash, count(*) from books where 7 < ( select cash from books as child where books.title = child.title ) group by cash;\n");
+        checkDDLAgainstScalarSubquerySchema("Materialized view \"TVIEW\" with subquery sources is not supported.",
+                                    "create view tview as select cash, count(*) from books where ( select cash from books as child where books.title = child.title ) < 100 group by cash;\n");
+    }
+
+    /*
+     * When ENG-8727 is addressed, reenable this test.
+     */
+    public void notest8727SubqueriesInViewDisplayLists() throws Exception {
+        checkDDLAgainstScalarSubquerySchema("Materialized view \"TVIEW\" with subquery sources is not supported.",
+                                    "create view tview as select ( select cash from books as child where books.title = child.title ) as bucks, count(*) from books group by bucks;\n");
+    }
+
+    public void test8291UnhelpfulSubqueryErrorMessage() throws Exception {
+        checkDDLAgainstScalarSubquerySchema("DDL Error: \"user lacks privilege or object not found: BOOKS.TITLE\" in statement starting on lineno: 1",
+                                    "create view tview as select cash, count(*), max(( select cash from books as child where books.title = child.title )) from books group by cash;\n");
+        checkDDLAgainstScalarSubquerySchema("DDL Error: \"user lacks privilege or object not found: BOOKS.CASH\" in statement starting on lineno: 1",
+                                    "create view tview as select cash, count(*), max(( select cash from books as child where books.cash = child.cash )) from books group by cash;\n");
+    }
+
+    public void test8290UnboundIdentifiersNotCaughtEarlyEnough() throws Exception {
+        // The name parent is not defined here.  This is an
+        // HSQL bug somehow.
+        checkDDLAgainstScalarSubquerySchema("Object not found: PARENT",
+                                    "create index bidx1 on books ( ( select title from books as child where child.cash = parent.cash ) ) ;");
+        checkDDLAgainstScalarSubquerySchema("Object not found: PARENT",
+                                    "create index bidx2 on books ( cash + ( select cash from books as child where child.title < parent.title ) );");
+    }
+
+    public void testAggregateExpressionsInIndices() throws Exception {
+        String ddl = "create table alpha (id integer not null, seqnum float);";
+        // Test for time sensitive queries.
+        checkDDLAgainstGivenSchema(".*Index \"FAULTY\" cannot include the function NOW or CURRENT_TIMESTAMP\\.",
+                                    ddl,
+                                    "create index faulty on alpha(id, NOW);");
+        checkDDLAgainstGivenSchema(".*Index \"FAULTY\" cannot include the function NOW or CURRENT_TIMESTAMP\\.",
+                                   ddl,
+                                   "create index faulty on alpha(id, CURRENT_TIMESTAMP);");
+        // Test for aggregate calls.
+        checkDDLAgainstGivenSchema(".*Index \"FAULTY\" with aggregate expression\\(s\\) is not supported\\.",
+                                   ddl,
+                                   "create index faulty on alpha(id, seqnum + avg(seqnum));");
+        checkDDLAgainstGivenSchema(".*Index \"FAULTY\" with aggregate expression\\(s\\) is not supported\\.",
+                                   ddl,
+                                   "create index faulty on alpha(id, seqnum + max(seqnum));");
+        checkDDLAgainstGivenSchema(".*Index \"FAULTY\" with aggregate expression\\(s\\) is not supported\\.",
+                                   ddl,
+                                   "create index faulty on alpha(id, seqnum + min(seqnum));");
+        checkDDLAgainstGivenSchema(".*Index \"FAULTY\" with aggregate expression\\(s\\) is not supported\\.",
+                                   ddl,
+                                   "create index faulty on alpha(id, seqnum + count(seqnum));");
+        checkDDLAgainstGivenSchema(".*Index \"FAULTY\" with aggregate expression\\(s\\) is not supported\\.",
+                                   ddl,
+                                   "create index faulty on alpha(id, seqnum + count(*));");
+        checkDDLAgainstGivenSchema(".*Index \"FAULTY\" with aggregate expression\\(s\\) is not supported\\.",
+                                   ddl,
+                                   "create index faulty on alpha(id, 100 + sum(id));");
+        // Test for subqueries.
+        checkDDLAgainstGivenSchema(".*Index \"FAULTY\" with subquery sources is not supported\\.",
+                                   ddl,
+                                   "create index faulty on alpha(id = (select id + id from alpha));");
     }
 
     private int countStringsMatching(List<String> diagnostics, String pattern) {

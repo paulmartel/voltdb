@@ -20,8 +20,9 @@ package org.voltdb;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -30,24 +31,28 @@ import org.eclipse.jetty.continuation.ContinuationSupport;
 import org.eclipse.jetty.server.Request;
 import org.voltcore.logging.Level;
 import org.voltcore.logging.VoltLogger;
+import org.voltcore.utils.CoreUtils;
 import org.voltcore.utils.EstTime;
 import org.voltcore.utils.RateLimitedLogger;
 import org.voltdb.VoltDB.Configuration;
 import org.voltdb.client.AuthenticatedConnectionCache;
-import org.voltdb.client.Client;
+import org.voltdb.client.ClientAuthHashScheme;
 import org.voltdb.client.ClientResponse;
+import org.voltdb.client.NoConnectionsException;
 import org.voltdb.client.ProcedureCallback;
 import org.voltdb.utils.Base64;
 import org.voltdb.utils.Encoder;
 
 public class HTTPClientInterface {
 
+    public static final String QUERY_TIMEOUT_PARAM = "Querytimeout";
+
     private static final VoltLogger m_log = new VoltLogger("HOST");
     private static final RateLimitedLogger m_rate_limited_log = new RateLimitedLogger(10 * 1000, m_log, Level.WARN);
 
-    AuthenticatedConnectionCache m_connections = null;
+    AtomicReference<AuthenticatedConnectionCache> m_connections = new AtomicReference<AuthenticatedConnectionCache>();
+    private AuthenticatedConnectionCache m_oldCache;
     static final int CACHE_TARGET_SIZE = 10;
-    private final AtomicBoolean m_shouldUpdateCatalog = new AtomicBoolean(false);
 
     public static final String PARAM_USERNAME = "User";
     public static final String PARAM_PASSWORD = "Password";
@@ -55,7 +60,9 @@ public class HTTPClientInterface {
     public static final String PARAM_ADMIN = "admin";
     int m_timeout = 0;
     final String m_timeoutResponse;
+    private final ExecutorService m_closeAllExecutor;
 
+    public final static int MAX_QUERY_PARAM_SIZE = 2 * 1024 * 1024; // 2MB
 
     public void setTimeout(int seconds) {
         m_timeout = seconds * 1000;
@@ -102,11 +109,19 @@ public class HTTPClientInterface {
         final ClientResponseImpl r = new ClientResponseImpl(ClientResponse.CONNECTION_TIMEOUT,
                 new VoltTable[0], "Request Timeout");
         m_timeoutResponse = r.toJSONString();
+        m_closeAllExecutor = CoreUtils.getSingleThreadExecutor("HttpClientInterface-closeAll");
+    }
+
+    public void stop() {
+        // This is called on server shutdown.
+        // So, it is OK if we interrupt threads trying to close client connections.
+        m_closeAllExecutor.shutdownNow();
     }
 
     public void process(Request request, HttpServletResponse response) {
         AuthenticationResult authResult = null;
-
+        boolean suspended = false;
+        boolean forceClose = false;
         Continuation continuation = ContinuationSupport.getContinuation(request);
         if (m_timeout > 0) {
             continuation.setTimeout(m_timeout);
@@ -140,7 +155,7 @@ public class HTTPClientInterface {
             jsonp = request.getParameter("jsonp");
             if (request.getMethod().equalsIgnoreCase("POST")) {
                 int queryParamSize = request.getContentLength();
-                if (queryParamSize > 150000) {
+                if (queryParamSize > MAX_QUERY_PARAM_SIZE) {
                     // We don't want to be building huge strings
                     throw new Exception("Query string too large: " + String.valueOf(request.getContentLength()));
                 }
@@ -151,6 +166,27 @@ public class HTTPClientInterface {
 
             String procName = request.getParameter("Procedure");
             String params = request.getParameter("Parameters");
+            String timeoutStr = request.getParameter(QUERY_TIMEOUT_PARAM);
+            int queryTimeout = -1;
+            if (timeoutStr != null) {
+                try {
+                    queryTimeout = Integer.parseInt(timeoutStr);
+                    if (queryTimeout <= 0) {
+                        throw new NumberFormatException();
+                    }
+                } catch(NumberFormatException e) {
+                    ClientResponseImpl rimpl = new ClientResponseImpl(ClientResponse.UNEXPECTED_FAILURE, new VoltTable[0],
+                            "Invalid procedure call timeout: " + timeoutStr);
+                    String msg = rimpl.toJSONString();
+                    if (jsonp != null) {
+                        msg = String.format("%s( %s )", jsonp, msg);
+                    }
+                    response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+                    try {
+                        response.getWriter().print(msg);
+                    } catch (IOException e1) {} // Ignore this as browser must have closed.
+                }
+            }
 
             // null procs are bad news
             if (procName == null) {
@@ -175,7 +211,7 @@ public class HTTPClientInterface {
             }
 
             continuation.suspend(response);
-
+            suspended = true;
             JSONProcCallback cb = new JSONProcCallback(request, continuation, jsonp);
             boolean success;
             if (params != null) {
@@ -195,10 +231,18 @@ public class HTTPClientInterface {
                     continuation.complete();
                     return;
                 }
-                success = authResult.m_client.callProcedure(cb, procName, paramSet.toArray());
+                if (queryTimeout==-1) {
+                    success = authResult.m_client.callProcedure(cb, procName, paramSet.toArray());
+                } else {
+                    success = authResult.m_client.callProcedureWithTimeout(cb, queryTimeout, procName, paramSet.toArray());
+                }
             }
             else {
-                success = authResult.m_client.callProcedure(cb, procName);
+                if (queryTimeout==-1) {
+                    success = authResult.m_client.callProcedure(cb, procName);
+                } else {
+                    success = authResult.m_client.callProcedureWithTimeout(cb, queryTimeout, procName);
+                }
             }
             if (!success) {
                 throw new Exception("Server is not accepting work at this time.");
@@ -209,6 +253,9 @@ public class HTTPClientInterface {
             request.setAttribute("SQLSUBMITTED", Boolean.TRUE);
         } catch (Exception e) {
             String msg = e.getMessage();
+            if (e instanceof IOException || e instanceof NoConnectionsException) {
+                forceClose = true;
+            }
             m_rate_limited_log.log("JSON interface exception: " + msg, EstTime.currentTimeMillis());
             ClientResponseImpl rimpl = new ClientResponseImpl(ClientResponse.UNEXPECTED_FAILURE, new VoltTable[0], msg);
             msg = rimpl.toJSONString();
@@ -219,10 +266,12 @@ public class HTTPClientInterface {
             request.setHandled(true);
             try {
                 response.getWriter().print(msg);
-                continuation.complete();
+                if (suspended) {
+                    continuation.complete();
+                }
             } catch (IOException e1) {} // Ignore this as browser must have closed.
         } finally {
-            releaseClient(authResult);
+            releaseClient(authResult, forceClose);
         }
     }
 
@@ -263,19 +312,12 @@ public class HTTPClientInterface {
         }
         String admin = request.getParameter(PARAM_ADMIN);
 
-        // first check for a catalog update and purge the cached connections
-        // if one has happened since we were here last
-        if (m_shouldUpdateCatalog.compareAndSet(true, false))
-        {
-            if (m_connections != null) {
-                m_connections.closeAll();
-                // Just null the old object so we'll create a new one with
-                // updated state below
-                m_connections = null;
+        AuthenticatedConnectionCache connection_cache = m_connections.get();
+        while (connection_cache == null) { // Need a while loop here because there is a small chance that
+            // catalog update could null out the cache immediately after another request thread sets it.
+            if (m_oldCache!=null) {
+                closeAllAsync(m_oldCache);
             }
-        }
-
-        if (m_connections == null) {
             Configuration config = VoltDB.instance().getConfig();
             int port = config.m_port;
             int adminPort = config.m_adminPort;
@@ -293,7 +335,13 @@ public class HTTPClientInterface {
             if (config.m_adminInterface.length() > 0) {
                 adminInterface = config.m_adminInterface;
             }
-            m_connections = new AuthenticatedConnectionCache(10, clientInterface, port, adminInterface, adminPort);
+            AuthenticatedConnectionCache newCache = new AuthenticatedConnectionCache(10, clientInterface, port, adminInterface, adminPort);
+            boolean setNewValue = m_connections.compareAndSet(null, newCache);
+            if (setNewValue) {
+                connection_cache = newCache;
+            } else {
+                connection_cache = m_connections.get();
+            }
         }
 
         // check for admin mode
@@ -309,37 +357,61 @@ public class HTTPClientInterface {
         if (password != null) {
             try {
                 // Create a MessageDigest every time because MessageDigest is not thread safe (ENG-5438)
-                MessageDigest md = MessageDigest.getInstance("SHA-1");
+                MessageDigest md = MessageDigest.getInstance(ClientAuthHashScheme.getDigestScheme(ClientAuthHashScheme.HASH_SHA256));
                 hashedPasswordBytes = md.digest(password.getBytes(StandardCharsets.UTF_8));
-            } catch (NoSuchAlgorithmException e) {
-                return new AuthenticationResult(null, adminMode, username, "JVM doesn't support SHA-1 hashing. Please use a supported JVM" + e);
+            } catch (Exception e) {
+                return new AuthenticationResult(null, null, null, adminMode, username, "JVM doesn't support SHA-1 hashing. Please use a supported JVM" + e);
             }
         }
         // note that HTTP Var "Hashedpassword" has a higher priority
         // Hashedassword must be a 40-byte hex-encoded SHA-1 hash (20 bytes unencoded)
+        // OR
+        // Hashedassword must be a 64-byte hex-encoded SHA-256 hash (32 bytes unencoded)
         if (hashedPassword != null) {
-            if (hashedPassword.length() != 40) {
-                return new AuthenticationResult(null, adminMode, username, "Hashedpassword must be a 40-byte hex-encoded SHA-1 hash (20 bytes unencoded).");
+            if (hashedPassword.length() != 40 && hashedPassword.length() != 64) {
+                return new AuthenticationResult(null, null, null, adminMode, username, "Hashedpassword must be a 40-byte hex-encoded SHA-1 hash (20 bytes unencoded). "
+                        + "or 64-byte hex-encoded SHA-256 hash (32 bytes unencoded)");
             }
             try {
                 hashedPasswordBytes = Encoder.hexDecode(hashedPassword);
             }
             catch (Exception e) {
-                return new AuthenticationResult(null, adminMode, username, "Hashedpassword must be a 40-byte hex-encoded SHA-1 hash (20 bytes unencoded).");
+                return new AuthenticationResult(null, null, null, adminMode, username, "Hashedpassword must be a 40-byte hex-encoded SHA-1 hash (20 bytes unencoded). "
+                        + "or 64-byte hex-encoded SHA-256 hash (32 bytes unencoded)");
             }
         }
 
-        assert((hashedPasswordBytes == null) || (hashedPasswordBytes.length == 20));
+        assert((hashedPasswordBytes == null) || (hashedPasswordBytes.length == 20) || (hashedPasswordBytes.length == 32));
 
         try {
             // get a connection to localhost from the pool
-            Client client = m_connections.getClient(username, password, hashedPasswordBytes, adminMode);
-            if (client != null) {
-                return new AuthenticationResult(client, adminMode, username, "");
+            AuthenticatedConnectionCache.ClientWithHashScheme clientWithScheme =
+                    connection_cache.getClient(username, password, hashedPasswordBytes, adminMode);
+            if (clientWithScheme != null && clientWithScheme.m_client != null && clientWithScheme.m_scheme != null) {
+                return new AuthenticationResult(clientWithScheme.m_client, connection_cache, clientWithScheme.m_scheme,
+                        adminMode, username, "");
             }
-            return new AuthenticationResult(null, adminMode, username, "Failed to get client.");
+            return new AuthenticationResult(null, null, null, adminMode, username, "Failed to get client.");
         } catch (IOException ex) {
-            return new AuthenticationResult(null, adminMode, username, ex.getMessage());
+            return new AuthenticationResult(null, null, null, adminMode, username, ex.getMessage());
+        }
+    }
+
+    private void closeAllAsync(final AuthenticatedConnectionCache cache) {
+        if (cache.isClosing()) {
+            return;
+        }
+
+        try {
+            m_closeAllExecutor.submit(new Runnable() {
+                @Override
+                public void run() {
+                    cache.closeAll();
+                }
+            });
+        } catch(RejectedExecutionException e) {
+            m_rate_limited_log.log(System.currentTimeMillis(), Level.WARN, e,
+                    "Task to close connections in old connection cache was rejected. Old connections will not be closed");
         }
     }
 
@@ -353,15 +425,19 @@ public class HTTPClientInterface {
     }
 
     //Must be called by all who call authenticate.
-    public void releaseClient(AuthenticationResult authResult) {
-        if (authResult != null && authResult.m_client != null) {
-            assert(m_connections != null);
-            m_connections.releaseClient(authResult.m_client);
+    public void releaseClient(AuthenticationResult authResult, boolean force) {
+        if (authResult != null && authResult.m_client != null && authResult.m_connectionCache != null) {
+            authResult.m_connectionCache.releaseClient(authResult.m_client, authResult.m_scheme, force || (authResult.m_connectionCache != m_connections.get()));
         }
     }
 
     public void notifyOfCatalogUpdate()
     {
-        m_shouldUpdateCatalog.set(true);
+        AuthenticatedConnectionCache cache = m_connections.get();
+        if (cache!=null) { // save the old cache so that it will be closed before we create cache again.
+            // Check for null to make sure that two consecutive catalog updates won't null out old cache erroneously.
+            m_oldCache = cache;
+        }
+        m_connections.set(null);
     }
 }

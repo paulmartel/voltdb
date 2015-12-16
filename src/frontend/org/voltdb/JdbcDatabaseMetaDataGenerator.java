@@ -17,8 +17,8 @@
 
 package org.voltdb;
 
-import java.io.PrintWriter;
-import java.io.StringWriter;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 import org.json_voltpatches.JSONException;
 import org.json_voltpatches.JSONObject;
@@ -27,8 +27,10 @@ import org.voltdb.VoltTable.ColumnInfo;
 import org.voltdb.catalog.Catalog;
 import org.voltdb.catalog.Column;
 import org.voltdb.catalog.ColumnRef;
+import org.voltdb.catalog.Connector;
 import org.voltdb.catalog.Constraint;
 import org.voltdb.catalog.Database;
+import org.voltdb.catalog.DatabaseConfiguration;
 import org.voltdb.catalog.Index;
 import org.voltdb.catalog.ProcParameter;
 import org.voltdb.catalog.Procedure;
@@ -36,6 +38,7 @@ import org.voltdb.catalog.Table;
 import org.voltdb.types.ConstraintType;
 import org.voltdb.types.IndexType;
 import org.voltdb.types.VoltDecimalHelper;
+import org.voltdb.utils.CatalogUtil;
 import org.voltdb.utils.InMemoryJarfile;
 
 public class JdbcDatabaseMetaDataGenerator
@@ -48,6 +51,8 @@ public class JdbcDatabaseMetaDataGenerator
     public static final String JSON_READ_ONLY = "readOnly";
     public static final String JSON_PARTITION_COLUMN = "partitionColumn";
     public static final String JSON_SOURCE_TABLE = "sourceTable";
+    public static final String JSON_LIMIT_PARTITION_ROWS_DELETE_STMT = "limitPartitionRowsDeleteStmt";
+    public static final String JSON_DRED_TABLE = "drEnabled";
     public static final String JSON_ERROR = "error";
 
     static public final ColumnInfo[] TABLE_SCHEMA =
@@ -61,7 +66,7 @@ public class JdbcDatabaseMetaDataGenerator
                           new ColumnInfo("TYPE_SCHEM", VoltType.STRING),
                           new ColumnInfo("TYPE_NAME", VoltType.STRING),
                           new ColumnInfo("SELF_REFERENCING_COL_NAME", VoltType.STRING),
-                          new ColumnInfo("REF_GENERATION", VoltType.STRING),
+                          new ColumnInfo("REF_GENERATION", VoltType.STRING)
                          };
 
     static public final ColumnInfo[] COLUMN_SCHEMA =
@@ -184,9 +189,17 @@ public class JdbcDatabaseMetaDataGenerator
             new ColumnInfo("ACTIVE_PROC", VoltType.TINYINT)
         };
 
-    JdbcDatabaseMetaDataGenerator(Catalog catalog, InMemoryJarfile jarfile)
+    static public final ColumnInfo[] CONFIG_SCHEMA =
+        new ColumnInfo[] {
+            new ColumnInfo("CONFIG_NAME", VoltType.STRING),
+            new ColumnInfo("CONFIG_VALUE", VoltType.STRING),
+            new ColumnInfo("CONFIG_DESCRIPTION", VoltType.STRING)
+        };
+
+    JdbcDatabaseMetaDataGenerator(Catalog catalog, DefaultProcedureManager defaultProcs, InMemoryJarfile jarfile)
     {
         m_catalog = catalog;
+        m_defaultProcs = defaultProcs;
         m_database = m_catalog.getClusters().get("cluster").getDatabases().get("database");
         m_jarfile = jarfile;
     }
@@ -228,6 +241,10 @@ public class JdbcDatabaseMetaDataGenerator
         {
             result = getClasses();
         }
+        else if (selector.equalsIgnoreCase("CONFIG"))
+        {
+            result = getConfigs();
+        }
         return result;
     }
 
@@ -238,12 +255,15 @@ public class JdbcDatabaseMetaDataGenerator
         {
             type = "VIEW";
         }
-        else if (m_database.getConnectors() != null &&
-                 m_database.getConnectors().get("0") != null &&
-                 m_database.getConnectors().get("0").getTableinfo() != null &&
-                 m_database.getConnectors().get("0").getTableinfo().getIgnoreCase(table.getTypeName()) != null)
+        else if (m_database.getConnectors() != null)
         {
-            type = "EXPORT";
+            for (Connector conn : m_database.getConnectors()) {
+                 if (conn.getTableinfo() != null &&
+                         conn.getTableinfo().getIgnoreCase(table.getTypeName()) != null) {
+                     type = "EXPORT";
+                     break;
+                 }
+            }
         }
         return type;
     }
@@ -263,22 +283,35 @@ public class JdbcDatabaseMetaDataGenerator
             }
 
             String remark = null;
-            if (partColumn != null) {
+            try {
                 JSONObject jsObj = new JSONObject();
-                try {
+
+                if (partColumn != null) {
                     jsObj.put(JSON_PARTITION_COLUMN, partColumn.getName());
                     if (type.equals("VIEW")) {
                         jsObj.put(JSON_SOURCE_TABLE, table.getMaterializer().getTypeName());
                     }
-                    remark = jsObj.toString();
-                } catch (JSONException e) {
-                    hostLog.warn("You have encountered an unexpected error while generating results for the " +
-                            "@SystemCatalog procedure call. This error will not affect your database's " +
-                            "operation. Please contact VoltDB support with your log files and a " +
-                            "description of what you were doing when this error occured.", e);
-                    remark = "{\"" + JSON_ERROR + "\",\"" + e.getMessage() + "\"}";
                 }
+
+                String deleteStmt = CatalogUtil.getLimitPartitionRowsDeleteStmt(table);
+                if (deleteStmt != null) {
+                    jsObj.put(JSON_LIMIT_PARTITION_ROWS_DELETE_STMT, deleteStmt);
+                }
+
+                if (table.getIsdred()) {
+                    jsObj.put(JSON_DRED_TABLE, "true");
+                }
+
+                remark = jsObj.length() > 0 ? jsObj.toString() : null;
+
+            } catch (JSONException e) {
+                hostLog.warn("You have encountered an unexpected error while generating results for the " +
+                        "@SystemCatalog procedure call. This error will not affect your database's " +
+                        "operation. Please contact VoltDB support with your log files and a " +
+                        "description of what you were doing when this error occured.", e);
+                remark = "{\"" + JSON_ERROR + "\":\"" + e.getMessage() + "\"}";
             }
+
             results.addRow(null,
                            null, // no schema name
                            table.getTypeName(),
@@ -545,7 +578,19 @@ public class JdbcDatabaseMetaDataGenerator
     VoltTable getProcedures()
     {
         VoltTable results = new VoltTable(PROCEDURES_SCHEMA);
-        for (Procedure proc : m_database.getProcedures())
+
+        // merge catalog and default procedures
+        SortedSet<Procedure> procedures = new TreeSet<>();
+        for (Procedure proc : m_database.getProcedures()) {
+            procedures.add(proc);
+        }
+        if (m_defaultProcs != null) {
+            for (Procedure proc : m_defaultProcs.m_defaultProcMap.values()) {
+                procedures.add(proc);
+            }
+        }
+
+        for (Procedure proc : procedures)
         {
             String remark = null;
             try {
@@ -646,7 +691,19 @@ public class JdbcDatabaseMetaDataGenerator
     VoltTable getProcedureColumns()
     {
         VoltTable results = new VoltTable(PROCEDURECOLUMNS_SCHEMA);
-        for (Procedure proc : m_database.getProcedures())
+
+        // merge catalog and default procedures
+        SortedSet<Procedure> procedures = new TreeSet<>();
+        for (Procedure proc : m_database.getProcedures()) {
+            procedures.add(proc);
+        }
+        if (m_defaultProcs != null) {
+            for (Procedure proc : m_defaultProcs.m_defaultProcMap.values()) {
+                procedures.add(proc);
+            }
+        }
+
+        for (Procedure proc : procedures)
         {
             for (ProcParameter param : proc.getParameters())
             {
@@ -738,7 +795,17 @@ public class JdbcDatabaseMetaDataGenerator
         return results;
     }
 
+    VoltTable getConfigs()
+    {
+        VoltTable results = new VoltTable(CONFIG_SCHEMA);
+        for (DatabaseConfiguration conf : DatabaseConfiguration.configurationList) {
+            results.addRow(conf.getName(), conf.getValue(m_database), conf.getDescription());
+        }
+        return results;
+    }
+
     private final Catalog m_catalog;
+    private final DefaultProcedureManager m_defaultProcs;
     private final Database m_database;
     private final InMemoryJarfile m_jarfile;
 }

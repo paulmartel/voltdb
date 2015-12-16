@@ -113,8 +113,9 @@ public class TestTwoSitePlans extends TestCase {
                                 0,
                                 0,
                                 "",
+                                0,
                                 100,
-                                new HashinatorConfig(HashinatorType.LEGACY, configBytes, 0, 0)));
+                                new HashinatorConfig(HashinatorType.LEGACY, configBytes, 0, 0), false));
             }
         };
         site1Thread.start();
@@ -131,8 +132,9 @@ public class TestTwoSitePlans extends TestCase {
                                 1,
                                 0,
                                 "",
+                                0,
                                 100,
-                                new HashinatorConfig(HashinatorType.LEGACY, configBytes, 0, 0)));
+                                new HashinatorConfig(HashinatorType.LEGACY, configBytes, 0, 0), false));
             }
         };
         site2Thread.start();

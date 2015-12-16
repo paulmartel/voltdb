@@ -34,7 +34,9 @@ import vmcTest.pages.*
  */
 class EchoingPageChangeListener implements PageChangeListener {
     void pageWillChange(Browser browser, Page oldPage, Page newPage) {
-        NavigatePagesTest.debugPrint "Browser ($browser) changing page from '$oldPage' to '$newPage'"
+        if (NavigatePagesTest.getBooleanSystemProperty("debugPrint", NavigatePagesTest.DEFAULT_DEBUG_PRINT)) {
+            println "Browser ($browser) changing page from '$oldPage' to '$newPage'"
+        }
     }
 }
 
@@ -43,27 +45,32 @@ class EchoingPageChangeListener implements PageChangeListener {
  * Management Center (VMC), which is the VoltDB (new) web UI.
  */
 class NavigatePagesTest extends TestBase {
-    @Rule public TestName name = new TestName()
 
     def setup() { // called before each test
-        debugPrint "\nTest: " + name.getMethodName()
-
+        // TestBase.setup gets called first (automatically)
         def listener = new EchoingPageChangeListener()
         browser.registerPageChangeListener(listener)
-
-        setup: 'Open VMC page'
-        to VoltDBManagementCenterPage
-        expect: 'to be on VMC page'
-        at VoltDBManagementCenterPage
     }
 
-    def 'confirm DB Monitor page open initially'() {
-        expect: 'DB Monitor page open initially'
-        page.isDbMonitorPageOpen()
+    def 'confirm DB Monitor page opens initially'() {
+        expect: 'DB Monitor page was open initially'
+        doesDBMonitorPageOpenFirst
     }
 
     def navigatePages() {
-        when: 'click the Schema link (from DB Monitor page)'
+
+        // Visit each page (tab), moving from left to right
+        when: 'click the DB Monitor link (if not already on DB Monitor page)'
+        page.openDbMonitorPage()
+        then: 'should be on DB Monitor page'
+        at DbMonitorPage
+
+        when: 'click the Admin link (from DB Monitor page)'
+        page.openAdminPage()
+        then: 'should be on Admin page'
+        at AdminPage
+
+        when: 'click the Schema link (from Admin page)'
         page.openSchemaPage()
         then: 'should be on Schema page'
         at SchemaPage
@@ -73,9 +80,10 @@ class NavigatePagesTest extends TestBase {
         then: 'should be on SQL Query page'
         at SqlQueryPage
 
+        // Visit each page (tab), moving from right to left
         when: 'click the DB Monitor link (from SQL Query page)'
         page.openDbMonitorPage()
-        then: 'should be on DB Monitor page'
+        then: 'should be on DB Monitor page (again)'
         at DbMonitorPage
 
         when: 'click the SQL Query link (from DB Monitor page)'
@@ -88,9 +96,35 @@ class NavigatePagesTest extends TestBase {
         then: 'should be on Schema page (again)'
         at SchemaPage
 
+        when: 'click the Admin link (from Schema page)'
+        page.openAdminPage()
+        then: 'should be on Admin page (again)'
+        at AdminPage
+
+        // Visit each page (tab), coming from the pages not covered above
+        when: 'click the SQL Query link (from Admin page)'
+        page.openSqlQueryPage()
+        then: 'should be on SQL Query page (yet again)'
+        at SqlQueryPage
+
+        when: 'click the Admin link (from SQL Query page)'
+        page.openAdminPage()
+        then: 'should be on Admin page (yet again)'
+        at AdminPage
+
+        when: 'click the DB Monitor link (from Admin page)'
+        page.openDbMonitorPage()
+        then: 'should be on DB Monitor page (yet again)'
+        at DbMonitorPage
+
+        when: 'click the Schema link (from DB Monitor page)'
+        page.openSchemaPage()
+        then: 'should be on Schema page (yet again)'
+        at SchemaPage
+
         when: 'click the DB Monitor link (from Schema page)'
         page.openDbMonitorPage()
-        then: 'should be on DB Monitor page (again)'
+        then: 'should be on DB Monitor page (one final time)'
         at DbMonitorPage
     }
 }

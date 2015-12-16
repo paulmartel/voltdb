@@ -26,6 +26,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import org.voltcore.logging.VoltLogger;
 import org.voltdb.CLIConfig;
+import org.voltdb.CLIConfig.Option;
 import org.voltdb.client.Client;
 import org.voltdb.client.ClientConfig;
 import org.voltdb.client.ClientFactory;
@@ -188,9 +189,6 @@ public class JDBCLoader implements BulkLoaderErrorHandler {
         @Option(shortOpt = "p", desc = "procedure name to insert the data into the database")
         String procedure = "";
 
-        @Option(desc = "maximum rows to be read from the CSV file")
-        int limitrows = Integer.MAX_VALUE;
-
         @Option(shortOpt = "r", desc = "directory path for report files")
         String reportdir = System.getProperty("user.dir");
 
@@ -240,6 +238,9 @@ public class JDBCLoader implements BulkLoaderErrorHandler {
         // This is set to true when -p option us used.
         boolean useSuppliedProcedure = false;
 
+        @Option(desc = "Use upsert instead of insert", hasArg = false)
+        boolean update = false;
+
         /**
          * Validate command line options.
          */
@@ -268,6 +269,10 @@ public class JDBCLoader implements BulkLoaderErrorHandler {
             }
             if ((procedure != null) && (procedure.trim().length() > 0)) {
                 useSuppliedProcedure = true;
+            }
+            if ((useSuppliedProcedure) && (update)){
+                update = false;
+                exitWithMessageAndUsage("update is not applicable when stored procedure specified");
             }
             if ("".equals(jdbctable.trim())) {
                 jdbctable = table;
@@ -341,7 +346,7 @@ public class JDBCLoader implements BulkLoaderErrorHandler {
             if (config.useSuppliedProcedure) {
                 dataLoader = new CSVTupleDataLoader((ClientImpl) csvClient, config.procedure, errHandler);
             } else {
-                dataLoader = new CSVBulkDataLoader((ClientImpl) csvClient, config.table, config.batch, errHandler);
+                dataLoader = new CSVBulkDataLoader((ClientImpl) csvClient, config.table, config.batch, config.update, errHandler);
             }
 
             //Created Source reader
@@ -461,10 +466,8 @@ public class JDBCLoader implements BulkLoaderErrorHandler {
 
             totalRowCnt = JDBCStatementReader.m_totalRowCount.get();
 
-            if (config.limitrows == -1) {
-                out_reportfile.write("Input stopped after "
-                        + totalRowCnt + " rows read" + "\n");
-            }
+            out_reportfile.write("Input stopped after "
+                    + totalRowCnt + " rows read" + "\n");
             out_reportfile.write("Number of rows read from source: "
                     + totalRowCnt + "\n");
             out_reportfile.write("Number of rows successfully inserted: "

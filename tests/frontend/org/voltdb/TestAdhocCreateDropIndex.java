@@ -34,36 +34,24 @@ public class TestAdhocCreateDropIndex extends AdhocDDLTestBase {
 
     public void testBasicCreateIndex() throws Exception
     {
-        String pathToCatalog = Configuration.getPathToCatalogForTest("adhocddl.jar");
-        String pathToDeployment = Configuration.getPathToCatalogForTest("adhocddl.xml");
-
-        VoltProjectBuilder builder = new VoltProjectBuilder();
-        builder.addLiteralSchema(
-                "create table FOO (" +
-                "ID integer not null," +
-                "VAL bigint, " +
-                "constraint PK_TREE primary key (ID)" +
-                ");\n" +
-                "create table FOO_R (" +
-                "ID integer not null," +
-                "VAL bigint, " +
-                "constraint PK_TREE_R primary key (ID)" +
-                ");\n"
-                );
-        builder.addPartitionInfo("FOO", "ID");
-        builder.setUseDDLSchema(true);
-        boolean success = builder.compile(pathToCatalog, 2, 1, 0);
-        assertTrue("Schema compilation failed", success);
-        MiscUtils.copyFile(builder.getPathToDeployment(), pathToDeployment);
-
         VoltDB.Configuration config = new VoltDB.Configuration();
-        config.m_pathToCatalog = pathToCatalog;
-        config.m_pathToDeployment = pathToDeployment;
+        String ddl = "create table FOO (" +
+                     "ID integer not null," +
+                     "VAL bigint, " +
+                     "constraint PK_TREE primary key (ID)" +
+                     ");\n" +
+                     "create table FOO_R (" +
+                     "ID integer not null," +
+                     "VAL bigint, " +
+                     "constraint PK_TREE_R primary key (ID)" +
+                     ");\n" +
+                     "Partition table FOO on column ID;\n";
+        createSchema(config, ddl, 2, 1, 0);
 
         try {
             startSystem(config);
 
-            // Create index on partitioned tables
+            // Create index on tables
             assertFalse(findIndexInSystemCatalogResults("FOODEX"));
             try {
                 m_client.callProcedure("@AdHoc",
@@ -145,5 +133,186 @@ public class TestAdhocCreateDropIndex extends AdhocDDLTestBase {
         finally {
             teardownSystem();
         }
+    }
+
+    public void testCreatePartialIndex() throws Exception
+    {
+        VoltDB.Configuration config = new VoltDB.Configuration();
+        String ddl = "create table FOO (" +
+                     "ID integer not null," +
+                     "TS timestamp, " +
+                     "constraint PK_TREE primary key (ID)" +
+                     ");\n" +
+                     "partition table FOO on column ID;\n" +
+                     "create table FOO_R (" +
+                     "ID integer not null," +
+                     "TS timestamp, " +
+                     "constraint PK_TREE_R primary key (ID)" +
+                     ");\n" +
+                     "";
+        createSchema(config, ddl, 2, 1, 0);
+
+        try {
+            startSystem(config);
+
+            // Create a partial index on the partitioned table
+            assertFalse(findIndexInSystemCatalogResults("partial_FOO_ts"));
+            try {
+                // Use a timestamp constant to validate ENG-9283
+                m_client.callProcedure("@AdHoc",
+                        "create index partial_FOO_ts on FOO (TS) where TS > '2000-01-01';");
+            }
+            catch (ProcCallException pce) {
+                pce.printStackTrace();
+                fail("Should be able to create a partial index on a partitioned table");
+            }
+            assertTrue(findIndexInSystemCatalogResults("partial_FOO_ts"));
+
+            // Create a partial index on the replicated table.
+            // It is unlikely that switching to use a replicated table will
+            // uncover a failure when the partitioned table test apparently
+            // succeeded, UNLESS that partitioned table schema change
+            // succeeded BUT left the schema in a compromised state that is
+            // operational but no longer mutable.
+            // This has happened in the past because of issues with
+            // regenerating the SQL DDL syntax that effectively recreates the
+            // pre-existing schema. This kind of error will only be discovered
+            // by a subsequent attempt to alter the schema.
+            // Uncovering that failure mode may be the most useful role
+            // of this additional test step.
+            assertFalse(findIndexInSystemCatalogResults("partial_FOO_R_ts"));
+            try {
+                m_client.callProcedure("@AdHoc",
+                        "create index partial_FOO_R_ts on FOO_R (TS) where TS > '2000-01-01';");
+            }
+            catch (ProcCallException pce) {
+                pce.printStackTrace();
+                fail("Should be able to create a partial index on a replicated table" +
+                     " after apparently succeeding with a partitioned table.");
+            }
+            assertTrue(findIndexInSystemCatalogResults("partial_FOO_R_ts"));
+
+        }
+        finally {
+            teardownSystem();
+        }
+    }
+
+    public void testCreateDropIndexonView() throws Exception
+    {
+        VoltDB.Configuration config = new VoltDB.Configuration();
+        String ddl = "create table FOO (" +
+                     "ID integer not null," +
+                     "VAL bigint, " +
+                     "VAL1 float," +
+                     "constraint PK_TREE primary key (ID)" +
+                     ");\n" +
+                     "Partition table FOO on column ID;\n";
+        createSchema(config, ddl, 2, 1, 0);
+
+        try {
+            startSystem(config);
+
+            // create a basic view
+            assertFalse(findTableInSystemCatalogResults("FOOVIEW"));
+            try {
+                m_client.callProcedure("@AdHoc",
+                    "create view FOOVIEW (VAL, VAL1, TOTAL) as " +
+                    "select VAL, VAL1, COUNT(*) from FOO group by VAL, VAL1;");
+            }
+            catch (ProcCallException pce) {
+                pce.printStackTrace();
+                fail("Should be able to create a view");
+            }
+            assertTrue(findTableInSystemCatalogResults("FOOVIEW"));
+
+            // Create index on view
+            assertFalse(findIndexInSystemCatalogResults("VALDEX"));
+            try {
+                m_client.callProcedure("@AdHoc",
+                        "create index SimpleIndex on FOOVIEW (VAL);");
+            }
+            catch (ProcCallException pce) {
+                pce.printStackTrace();
+                fail("Should be able to create an index on a view");
+            }
+            assertTrue(findIndexInSystemCatalogResults("SimpleIndex"));
+
+            // drop index
+            try {
+                m_client.callProcedure("@AdHoc",
+                        "drop index SimpleIndex;");
+            }
+            catch (ProcCallException pce) {
+                pce.printStackTrace();
+                fail("Should be able to drop an index on a view");
+            }
+            assertFalse(findIndexInSystemCatalogResults("SimpleIndex"));
+
+            // can't drop index twice
+            boolean threw = false;
+            try {
+                m_client.callProcedure("@AdHoc",
+                        "drop index SimpleIndex;");
+            }
+            catch (ProcCallException pce) {
+                threw = true;
+            }
+            assertTrue("Shouldn't be able to drop bad index without if exists", threw);
+            assertFalse(findIndexInSystemCatalogResults("SimpleIndex"));
+
+            // should be able to execute drop index on non-existing index
+            // with "if exists" clause
+            try {
+                m_client.callProcedure("@AdHoc",
+                        "drop index SimpleIndex if exists;");
+            }
+            catch (ProcCallException pce) {
+                pce.printStackTrace();
+                fail("Should be able to drop a bad index with if exists");
+            }
+            assertFalse(findIndexInSystemCatalogResults("SimpleIndex"));
+
+            // recreate index
+            try {
+                m_client.callProcedure("@AdHoc",
+                        "create index ComplexIndex on FOOVIEW (VAL, TOTAL);");
+            }
+            catch (ProcCallException pce) {
+                pce.printStackTrace();
+                fail("Should be able to recreate an index on a view");
+            }
+            assertTrue(findIndexInSystemCatalogResults("ComplexIndex"));
+
+            // drop index
+            try {
+                m_client.callProcedure("@AdHoc",
+                        "drop index ComplexIndex if exists;");
+            }
+            catch (ProcCallException pce) {
+                pce.printStackTrace();
+                fail("Should be able to drop an index on a view");
+            }
+            assertFalse(findIndexInSystemCatalogResults("ComplexIndex"));
+        }
+        finally {
+            teardownSystem();
+        }
+    }
+
+    private void createSchema(VoltDB.Configuration config,
+                              String ddl,
+                              final int sitesPerHost,
+                              final int hostCount,
+                              final int replication) throws Exception
+    {
+        VoltProjectBuilder builder = new VoltProjectBuilder();
+        builder.addLiteralSchema(ddl);
+        builder.setUseDDLSchema(true);
+        config.m_pathToCatalog = Configuration.getPathToCatalogForTest("adhocddl.jar");
+        boolean success = builder.compile(config.m_pathToCatalog, sitesPerHost, hostCount, replication);
+        assertTrue("Schema compilation failed", success);
+        config.m_pathToDeployment = Configuration.getPathToCatalogForTest("adhocddl.xml");
+        MiscUtils.copyFile(builder.getPathToDeployment(), config.m_pathToDeployment);
     }
 }

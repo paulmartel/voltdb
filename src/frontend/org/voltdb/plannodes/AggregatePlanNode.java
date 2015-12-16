@@ -18,18 +18,26 @@
 package org.voltdb.plannodes;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
 import org.json_voltpatches.JSONArray;
 import org.json_voltpatches.JSONException;
 import org.json_voltpatches.JSONObject;
 import org.json_voltpatches.JSONStringer;
+import org.voltdb.VoltType;
+import org.voltdb.catalog.Column;
 import org.voltdb.catalog.Database;
+import org.voltdb.catalog.Table;
 import org.voltdb.expressions.AbstractExpression;
+import org.voltdb.expressions.AbstractSubqueryExpression;
+import org.voltdb.expressions.AggregateExpression;
 import org.voltdb.expressions.ExpressionUtil;
 import org.voltdb.expressions.TupleValueExpression;
+import org.voltdb.planner.parseinfo.StmtTargetTableScan;
 import org.voltdb.types.ExpressionType;
 import org.voltdb.types.PlanNodeType;
+import org.voltdb.types.SortDirectionType;
 
 public class AggregatePlanNode extends AbstractPlanNode {
 
@@ -81,6 +89,10 @@ public class AggregatePlanNode extends AbstractPlanNode {
         return PlanNodeType.AGGREGATE;
     }
 
+    public List<ExpressionType> getAggregateTypes() {
+        return m_aggregateTypes;
+    }
+
     @Override
     public void validate() throws Exception {
         super.validate();
@@ -101,25 +113,88 @@ public class AggregatePlanNode extends AbstractPlanNode {
     }
 
     public boolean isTableCountStar() {
-        if (m_groupByExpressions.isEmpty() == false)
+        if (m_groupByExpressions.isEmpty() == false) {
             return false;
-        if (m_aggregateTypes.size() != 1)
+        }
+        if (m_aggregateTypes.size() != 1) {
             return false;
-        if (m_aggregateTypes.get(0).equals(ExpressionType.AGGREGATE_COUNT_STAR) == false)
+        }
+        if (m_aggregateTypes.get(0).equals(ExpressionType.AGGREGATE_COUNT_STAR) == false) {
             return false;
+        }
 
+        return true;
+    }
+
+    public boolean isTableNonDistinctCount() {
+        if (m_groupByExpressions.isEmpty() == false) {
+            return false;
+        }
+        if (m_aggregateTypes.size() != 1) {
+            return false;
+        }
+        if (m_aggregateTypes.get(0).equals(ExpressionType.AGGREGATE_COUNT) == false) {
+            return false;
+        }
+        // Does it have a distinct keyword?
+        if (m_aggregateDistinct.get(0) == 1) {
+            return false;
+        }
+        return true;
+    }
+
+    public boolean isTableNonDistinctCountConstant() {
+        if (!isTableNonDistinctCount()) {
+            return false;
+        }
+        // Is the expression a constant?
+        return m_aggregateExpressions.get(0).getExpressionType().equals(ExpressionType.VALUE_PARAMETER) ||
+                m_aggregateExpressions.get(0).getExpressionType().equals(ExpressionType.VALUE_CONSTANT);
+    }
+
+    public boolean isTableCountNonDistinctNullableColumn() {
+        if (!isTableNonDistinctCount()) {
+            return false;
+        }
+        // Is the expression a column?
+        if (! m_aggregateExpressions.get(0).getExpressionType().equals(ExpressionType.VALUE_TUPLE)) {
+            return false;
+        }
+        // Need to go to its child node to see the table schema.
+        // Normally it has to be a ScanPlanNode.
+        // If the query is a join query then the child will be something like nested loop.
+        assert (m_children.size() == 1);
+        if (! (m_children.get(0) instanceof AbstractScanPlanNode) ) {
+            return false;
+        }
+        AbstractScanPlanNode asp = (AbstractScanPlanNode)m_children.get(0);
+        if ( ! (asp.getTableScan() instanceof StmtTargetTableScan)) {
+            return false;
+        }
+        StmtTargetTableScan sttscan = (StmtTargetTableScan)asp.getTableScan();
+        Table tbl = sttscan.getTargetTable();
+        TupleValueExpression tve = (TupleValueExpression)m_aggregateExpressions.get(0);
+        String columnName = tve.getColumnName();
+        Column col = tbl.getColumns().get(columnName);
+        // Is the column nullable?
+        if (col.getNullable()) {
+            return false;
+        }
         return true;
     }
 
     // single min() without GROUP BY?
     public boolean isTableMin() {
         // do not support GROUP BY for now
-        if (m_groupByExpressions.isEmpty() == false)
+        if (m_groupByExpressions.isEmpty() == false) {
             return false;
-        if (m_aggregateTypes.size() != 1)
+        }
+        if (m_aggregateTypes.size() != 1) {
             return false;
-        if (m_aggregateTypes.get(0).equals(ExpressionType.AGGREGATE_MIN) == false)
+        }
+        if (m_aggregateTypes.get(0).equals(ExpressionType.AGGREGATE_MIN) == false) {
             return false;
+        }
 
         return true;
     }
@@ -127,12 +202,15 @@ public class AggregatePlanNode extends AbstractPlanNode {
     // single max() without GROUP BY?
     public boolean isTableMax() {
         // do not support GROUP BY for now
-        if (m_groupByExpressions.isEmpty() == false)
+        if (m_groupByExpressions.isEmpty() == false) {
             return false;
-        if (m_aggregateTypes.size() != 1)
+        }
+        if (m_aggregateTypes.size() != 1) {
             return false;
-        if (m_aggregateTypes.get(0).equals(ExpressionType.AGGREGATE_MAX) == false)
+        }
+        if (m_aggregateTypes.get(0).equals(ExpressionType.AGGREGATE_MAX) == false) {
             return false;
+        }
 
         return true;
     }
@@ -182,6 +260,11 @@ public class AggregatePlanNode extends AbstractPlanNode {
             m_children.get(0).generateOutputSchema(db);
 
             assert(m_hasSignificantOutputSchema);
+        }
+        // Possible subquery expressions
+        Collection<AbstractExpression> exprs = findAllExpressionsOfClass(AbstractSubqueryExpression.class);
+        for (AbstractExpression expr: exprs) {
+            ExpressionUtil.generateSubqueryExpressionOutputSchema(expr, db);
         }
     }
 
@@ -258,6 +341,11 @@ public class AggregatePlanNode extends AbstractPlanNode {
             tve.setColumnIndex(index);
         }
 
+        // Possible subquery expressions
+        Collection<AbstractExpression> exprs = findAllExpressionsOfClass(AbstractSubqueryExpression.class);
+        for (AbstractExpression expr: exprs) {
+            ExpressionUtil.resolveSubqueryExpressionColumnIndexes(expr);
+        }
     }
 
     /**
@@ -290,6 +378,24 @@ public class AggregatePlanNode extends AbstractPlanNode {
             assert(aggInputExpr != null);
             m_aggregateExpressions.add((AbstractExpression) aggInputExpr.clone());
         }
+    }
+
+    public void updateAggregate(
+            int index,
+            ExpressionType aggType) {
+
+        // Create a new aggregate expression which we'll use to update the
+        // output schema (whose exprs are TVEs).
+        AggregateExpression aggExpr = new AggregateExpression(aggType);
+        aggExpr.finalizeValueTypes();
+
+        int outputSchemaIndex = m_aggregateOutputColumns.get(index);
+        SchemaColumn schemaCol = m_outputSchema.getColumns().get(outputSchemaIndex);
+        AbstractExpression schemaExpr = schemaCol.getExpression();
+        schemaExpr.setValueType(aggExpr.getValueType());
+        schemaExpr.setValueSize(aggExpr.getValueSize());
+
+        m_aggregateTypes.set(index, aggType);
     }
 
     public void addGroupByExpression(AbstractExpression expr)
@@ -405,7 +511,7 @@ public class AggregatePlanNode extends AbstractPlanNode {
             m_aggregateDistinct.add( tempObj.getInt( Members.AGGREGATE_DISTINCT.name() ) );
             m_aggregateOutputColumns.add( tempObj.getInt( Members.AGGREGATE_OUTPUT_COLUMN.name() ));
 
-            if (jobj.isNull(Members.AGGREGATE_EXPRESSION.name())) {
+            if (tempObj.isNull(Members.AGGREGATE_EXPRESSION.name())) {
                 m_aggregateExpressions.add(null);
             }
             else {
@@ -440,5 +546,81 @@ public class AggregatePlanNode extends AbstractPlanNode {
         }
 
         return aggNode;
+    }
+
+    @Override
+    public Collection<AbstractExpression> findAllExpressionsOfClass(Class< ? extends AbstractExpression> aeClass) {
+        Collection<AbstractExpression> collected = super.findAllExpressionsOfClass(aeClass);
+
+        collected.addAll(ExpressionUtil.findAllExpressionsOfClass(m_prePredicate, aeClass));
+        collected.addAll(ExpressionUtil.findAllExpressionsOfClass(m_postPredicate, aeClass));
+        for (AbstractExpression ae : m_aggregateExpressions) {
+            collected.addAll(ExpressionUtil.findAllExpressionsOfClass(ae, aeClass));
+        }
+        for (AbstractExpression ae : m_groupByExpressions) {
+            collected.addAll(ExpressionUtil.findAllExpressionsOfClass(ae, aeClass));
+        }
+        return collected;
+    }
+
+    @Override
+    public boolean isOutputOrdered (List<AbstractExpression> sortExpressions, List<SortDirectionType> sortDirections) {
+        if (getPlanNodeType() == PlanNodeType.HASHAGGREGATE) {
+            return false;
+        } else {
+            // the order for Serial and Partial aggregates is determined by the order
+            // of the keys from the child node
+            assert(getChildCount() == 1);
+            AbstractPlanNode child = getChild(0);
+            return child.isOutputOrdered(sortExpressions, sortDirections);
+        }
+    }
+
+    /**
+     * Convert HashAggregate into a Serialized Aggregate
+     *
+     * @param hashAggregateNode HashAggregatePlanNode
+     * @return AggregatePlanNode
+     */
+    public static AggregatePlanNode convertToSerialAggregatePlanNode(HashAggregatePlanNode hashAggregateNode) {
+        AggregatePlanNode serialAggr = new AggregatePlanNode();
+        return setAggregatePlanNode(hashAggregateNode, serialAggr);
+    }
+
+    /**
+     * Convert HashAggregate into a Partial Aggregate
+     *
+     * @param hashAggregateNode HashAggregatePlanNode
+     * @param aggrColumnIdxs partial aggregate column indexes
+     * @return AggregatePlanNode
+     */
+    public static AggregatePlanNode convertToPartialAggregatePlanNode(HashAggregatePlanNode hashAggregateNode,
+            List<Integer> aggrColumnIdxs) {
+        AggregatePlanNode partialAggr = new PartialAggregatePlanNode();
+        partialAggr = setAggregatePlanNode(hashAggregateNode, partialAggr);
+        partialAggr.m_partialGroupByColumns = aggrColumnIdxs;
+        return partialAggr;
+    }
+
+    private static AggregatePlanNode setAggregatePlanNode(AggregatePlanNode origin, AggregatePlanNode destination) {
+        destination.m_isCoordinatingAggregator = origin.m_isCoordinatingAggregator;
+        destination.m_prePredicate = origin.m_prePredicate;
+        destination.m_postPredicate = origin.m_postPredicate;
+        for (AbstractExpression expr : origin.m_groupByExpressions) {
+            destination.addGroupByExpression(expr);
+        }
+
+        List<ExpressionType> aggregateTypes = origin.m_aggregateTypes;
+        List<Integer> aggregateDistinct = origin.m_aggregateDistinct;
+        List<Integer> aggregateOutputColumns = origin.m_aggregateOutputColumns;
+        List<AbstractExpression> aggregateExpressions = origin.m_aggregateExpressions;
+        for (int i = 0; i < origin.getAggregateTypesSize(); i++) {
+            destination.addAggregate(aggregateTypes.get(i),
+                    aggregateDistinct.get(i) == 1 ? true : false,
+                    aggregateOutputColumns.get(i),
+                    aggregateExpressions.get(i));
+        }
+        destination.setOutputSchema(origin.getOutputSchema());
+        return destination;
     }
 }

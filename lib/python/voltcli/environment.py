@@ -69,6 +69,7 @@ else:
     java = utility.find_in_path('java')
 if not java:
     utility.abort('Could not find java in environment, set JAVA_HOME or put java in the path.')
+java_version = utility.get_java_version()
 java_opts = []
 
 #If this is a large memory system commit the full heap
@@ -101,7 +102,9 @@ if not [opt for opt in java_opts if opt.startswith('-Xmx')]:
 
 # Set common options now.
 java_opts.append('-server')
-java_opts.append('-Djava.awt.headless=true -Dsun.net.inetaddr.ttl=300 -Dsun.net.inetaddr.negative.ttl=3600')
+java_opts.append('-Djava.awt.headless=true')
+java_opts.append('-Dsun.net.inetaddr.ttl=300')
+java_opts.append('-Dsun.net.inetaddr.negative.ttl=3600')
 java_opts.append('-XX:+HeapDumpOnOutOfMemoryError')
 java_opts.append('-XX:HeapDumpPath=/tmp')
 java_opts.append('-XX:+UseParNewGC')
@@ -118,7 +121,10 @@ java_opts.append('-XX:CMSMaxAbortablePrecleanTime=120000')
 java_opts.append('-XX:+ExplicitGCInvokesConcurrent')
 java_opts.append('-XX:+CMSScavengeBeforeRemark')
 java_opts.append('-XX:+CMSClassUnloadingEnabled')
-java_opts.append('-XX:PermSize=64m')
+
+# skip PermSize in Java 8
+if "1.8" not in java_version:
+    java_opts.append('-XX:PermSize=64m')
 
 def initialize(standalone_arg, command_name_arg, command_dir_arg, version_arg):
     """
@@ -162,8 +168,7 @@ def initialize(standalone_arg, command_name_arg, command_dir_arg, version_arg):
             # Try to set VOLTDB_LIB if not set.
             if not os.environ.get('VOLTDB_LIB', ''):
                 for subdir in ('lib', os.path.join('lib', 'voltdb')):
-                    glob_chk = os.path.join(os.path.realpath(os.path.join(dir, subdir)),
-                                            'zmq*.jar')
+                    glob_chk = os.path.join(os.path.realpath(os.path.join(dir, subdir)), 'snappy*.jar')
                     lib_search_globs.append(glob_chk)
                     if glob.glob(glob_chk):
                         os.environ['VOLTDB_LIB'] = os.path.join(dir, subdir)

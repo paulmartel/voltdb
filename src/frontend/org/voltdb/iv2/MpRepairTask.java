@@ -22,14 +22,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 
-import com.google_voltpatches.common.base.Suppliers;
 import org.voltcore.logging.VoltLogger;
 import org.voltcore.utils.CoreUtils;
-import org.voltcore.utils.Pair;
-import org.voltdb.rejoin.TaskLog;
-
 import org.voltdb.SiteProcedureConnection;
 import org.voltdb.VoltDB;
+import org.voltdb.rejoin.TaskLog;
+
+import com.google_voltpatches.common.base.Suppliers;
 
 /**
  * This task runs on the MPI's site threads after a topology change which doesn't
@@ -70,10 +69,9 @@ public class MpRepairTask extends SiteTasker
         synchronized (m_lock) {
             if (!m_repairRan) {
                 try {
-                    Long txnid = Long.MIN_VALUE;
                     boolean success = false;
                     try {
-                        txnid = algo.start().get();
+                        algo.start().get();
                         success = true;
                     } catch (CancellationException e) {}
                     if (success) {

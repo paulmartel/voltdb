@@ -57,8 +57,11 @@ const int BUFFER_SIZE = 1024;
 
 class ExportTupleStreamTest : public Test {
 public:
-    ExportTupleStreamTest() : m_wrapper(NULL), m_schema(NULL), m_tuple(NULL),
-        m_context(new ExecutorContext( 1, 1, NULL, &m_topend, NULL, NULL, true, "localhost", 2, NULL)) {
+    ExportTupleStreamTest()
+      : m_context(new ExecutorContext(1, 1, NULL, &m_topend, &m_pool,
+                                      (NValueArray*)NULL, (VoltDBEngine*)NULL,
+                                    "localhost", 2, NULL, NULL, 0))
+    {
         srand(0);
 
         // set up the schema used to fill the new buffer
@@ -118,6 +121,8 @@ protected:
     char m_tupleMemory[(COLUMN_COUNT + 1) * 8];
     TableTuple* m_tuple;
     DummyTopend m_topend;
+    Pool m_pool;
+    UndoQuantum* m_quantum;
     boost::scoped_ptr<ExecutorContext> m_context;
 
 };
@@ -386,7 +391,7 @@ TEST_F(ExportTupleStreamTest, FillSingleTxnAndCommitWithRollback) {
     // we have a good buffer
     size_t mark = m_wrapper->bytesUsed();
     appendTuple(1, 2);
-    m_wrapper->rollbackTo(mark);
+    m_wrapper->rollbackTo(mark, 0);
 
     // so flush and make sure we got something sane
     m_wrapper->periodicFlush(-1, 1);
@@ -423,7 +428,7 @@ TEST_F(ExportTupleStreamTest, RollbackFirstTuple)
 
     appendTuple(1, 2);
     // rollback the first tuple
-    m_wrapper->rollbackTo(0);
+    m_wrapper->rollbackTo(0, 0);
 
     // write a new tuple and then flush the buffer
     appendTuple(1, 2);
@@ -454,7 +459,7 @@ TEST_F(ExportTupleStreamTest, RollbackMiddleTuple)
     // add another and roll it back and flush
     size_t mark = m_wrapper->bytesUsed();
     appendTuple(10, 11);
-    m_wrapper->rollbackTo(mark);
+    m_wrapper->rollbackTo(mark, 0);
     m_wrapper->periodicFlush(-1, 10);
 
     ASSERT_TRUE(m_topend.receivedExportBuffer);
@@ -483,7 +488,7 @@ TEST_F(ExportTupleStreamTest, RollbackWholeBuffer)
     {
         appendTuple(10, 11);
     }
-    m_wrapper->rollbackTo(mark);
+    m_wrapper->rollbackTo(mark, 0);
     m_wrapper->periodicFlush(-1, 10);
 
     ASSERT_TRUE(m_topend.receivedExportBuffer);

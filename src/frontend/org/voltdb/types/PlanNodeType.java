@@ -31,6 +31,7 @@ import org.voltdb.plannodes.InsertPlanNode;
 import org.voltdb.plannodes.LimitPlanNode;
 import org.voltdb.plannodes.MaterializePlanNode;
 import org.voltdb.plannodes.MaterializedScanPlanNode;
+import org.voltdb.plannodes.MergeReceivePlanNode;
 import org.voltdb.plannodes.NestLoopIndexPlanNode;
 import org.voltdb.plannodes.NestLoopPlanNode;
 import org.voltdb.plannodes.OrderByPlanNode;
@@ -40,6 +41,7 @@ import org.voltdb.plannodes.ReceivePlanNode;
 import org.voltdb.plannodes.SendPlanNode;
 import org.voltdb.plannodes.SeqScanPlanNode;
 import org.voltdb.plannodes.TableCountPlanNode;
+import org.voltdb.plannodes.TupleScanPlanNode;
 import org.voltdb.plannodes.UnionPlanNode;
 import org.voltdb.plannodes.UpdatePlanNode;
 
@@ -52,11 +54,12 @@ public enum PlanNodeType {
     //
     // Scan Nodes
     //
-    SEQSCAN         (10, SeqScanPlanNode.class),
-    INDEXSCAN       (11, IndexScanPlanNode.class),
+    SEQSCAN          (10, SeqScanPlanNode.class),
+    INDEXSCAN        (11, IndexScanPlanNode.class),
     INDEXCOUNT       (12, IndexCountPlanNode.class),
     TABLECOUNT       (13, TableCountPlanNode.class),
     MATERIALIZEDSCAN (14, MaterializedScanPlanNode.class),
+    TUPLESCAN        (15, TupleScanPlanNode.class),
 
     //
     // Join Nodes
@@ -76,6 +79,7 @@ public enum PlanNodeType {
     //
     SEND            (40, SendPlanNode.class),
     RECEIVE         (41, ReceivePlanNode.class),
+    MERGERECEIVE    (42, MergeReceivePlanNode.class),
 
     //
     // Misc Nodes

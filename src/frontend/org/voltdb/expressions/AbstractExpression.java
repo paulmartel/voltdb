@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.hsqldb_voltpatches.FunctionSQL;
 import org.json_voltpatches.JSONArray;
 import org.json_voltpatches.JSONException;
 import org.json_voltpatches.JSONObject;
@@ -57,7 +58,37 @@ public abstract class AbstractExpression implements JSONString, Cloneable {
     protected VoltType m_valueType = null;
     protected int m_valueSize = 0;
     protected boolean m_inBytes = false;
+    /*
+     * We set this to non-null iff the expression has a non-deterministic
+     * operation. The most common kind of non-deterministic operation is an
+     * aggregate function applied to a floating point expression.
+     */
+    private String m_contentDeterminismMessage = null;
 
+    /**
+     * Note that this expression is inherently non-deterministic. This may be
+     * called if the expression is already known to be non-deterministic, even
+     * if the value is false, because we are careful to never go from true to
+     * false here. Perhaps we should concatenate the messages. But since we only
+     * have one now it would result in unnecessary duplication.
+     *
+     * @param value
+     */
+    public void updateContentDeterminismMessage(String value) {
+        if (m_contentDeterminismMessage == null) {
+            m_contentDeterminismMessage = value;
+        }
+    }
+
+    /**
+     * Get the inherent non-determinism state of this expression. This is not
+     * valid before finalizeValueTypes is called.
+     *
+     * @return The state.
+     */
+    public String getContentDeterminismMessage() {
+        return m_contentDeterminismMessage;
+    }
     // Keep this flag turned off in production or when testing user-accessible EXPLAIN output or when
     // using EXPLAIN output to validate plans.
     protected static boolean m_verboseExplainForDebugging = false; // CODE REVIEWER! this SHOULD be false!
@@ -233,6 +264,15 @@ public abstract class AbstractExpression implements JSONString, Cloneable {
     }
 
     /**
+     * Update the argument at specified index
+     * @param index   the index of the item to replace
+     * @param arg     the new argument to insert into the list
+     */
+    public void setArgAtIndex(int index, AbstractExpression arg) {
+        m_args.set(index, arg);
+    }
+
+    /**
      * @return The type of this expression's value.
      */
     public VoltType getValueType() {
@@ -272,7 +312,49 @@ public abstract class AbstractExpression implements JSONString, Cloneable {
 
     @Override
     public String toString() {
-        return "Expression: " + toJSONString();
+        StringBuilder sb = new StringBuilder();
+        toStringHelper("", sb);
+        return sb.toString();
+    }
+
+    private static final String INDENT = "  | ";
+
+    /**
+     * Return a node name to help out toString.  Subclasses
+     * can chime in if they have a notion to.  See TupleValueExpression,
+     * for example.
+     */
+    protected String getExpressionNodeNameForToString() {
+        return this.getClass().getSimpleName();
+    }
+
+    private void toStringHelper(String linePrefix, StringBuilder sb) {
+        String nodeName = getExpressionNodeNameForToString();
+        String header = getExpressionNodeNameForToString() + "[" + getExpressionType().toString() + "] : ";
+        if (m_valueType != null) {
+            header += m_valueType.toSQLString();
+        }
+        else {
+            header += "[null type]";
+        }
+        sb.append(linePrefix + header + "\n");
+
+        if (m_left != null) {
+            sb.append(linePrefix + "Left:\n");
+            m_left.toStringHelper(linePrefix + INDENT, sb);
+        }
+
+        if (m_right != null) {
+            sb.append(linePrefix + "Right:\n");
+            m_right.toStringHelper(linePrefix + INDENT, sb);
+        }
+
+        if (m_args != null) {
+            sb.append(linePrefix + "Args:\n");
+            for (AbstractExpression arg : m_args) {
+                arg.toStringHelper(linePrefix + INDENT, sb);
+            }
+        }
     }
 
     @Override
@@ -494,7 +576,7 @@ public abstract class AbstractExpression implements JSONString, Cloneable {
             stringer.key(Members.RIGHT.name()).value(m_right);
         }
 
-        if (m_args != null && m_args.size() > 0) {
+        if (m_args != null) {
             stringer.key(Members.ARGS.name()).array();
             for (AbstractExpression argument : m_args) {
                 assert (argument instanceof JSONString);
@@ -591,6 +673,17 @@ public abstract class AbstractExpression implements JSONString, Cloneable {
         return result;
     }
 
+    public static void fromJSONArrayString(String jsontext, StmtTableScan tableScan, List<AbstractExpression> result) throws JSONException
+    {
+        result.addAll(fromJSONArrayString(jsontext, tableScan));
+    }
+
+    public static AbstractExpression fromJSONString(String jsontext, StmtTableScan tableScan) throws JSONException
+    {
+        JSONObject jobject = new JSONObject(jsontext);
+        return fromJSONObject(jobject, tableScan);
+    }
+
     /**
      * For TVEs, it is only serialized column index and table index. In order to match expression,
      * there needs more information to revert back the table name, table alisa and column name.
@@ -637,11 +730,15 @@ public abstract class AbstractExpression implements JSONString, Cloneable {
             ParsedColInfo col = indexToColumnMap.get(ii);
             TupleValueExpression tve = new TupleValueExpression(
                     col.tableName, col.tableAlias, col.columnName, col.alias, ii);
-            tve.setTypeSizeBytes(getValueType(), getValueSize(), getInBytes());
 
+            tve.setTypeSizeBytes(getValueType(), getValueSize(), getInBytes());
+            if (this instanceof TupleValueExpression) {
+                tve.setOrigStmtId(((TupleValueExpression)this).getOrigStmtId());
+            }
             // To prevent pushdown of LIMIT when ORDER BY references an agg. ENG-3487.
-            if (hasAnySubexpressionOfClass(AggregateExpression.class))
+            if (hasAnySubexpressionOfClass(AggregateExpression.class)) {
                 tve.setHasAggregate(true);
+            }
 
             return tve;
         }
@@ -856,6 +953,44 @@ public abstract class AbstractExpression implements JSONString, Cloneable {
     }
 
     /**
+     * A predicate class for searching expression trees,
+     * to be used with hasAnySubexpressionWithPredicate, below.
+     */
+    public static interface SubexprFinderPredicate {
+        boolean matches(AbstractExpression expr);
+    }
+
+    /**
+     * Searches the expression tree rooted at this for nodes for which "pred"
+     * evaluates to true.
+     * @param pred  Predicate object instantiated by caller
+     * @return      true if the predicate ever returns true, false otherwise
+     */
+    public boolean hasAnySubexpressionWithPredicate(SubexprFinderPredicate pred) {
+        if (pred.matches(this)) {
+            return true;
+        }
+
+        if (m_left != null && m_left.hasAnySubexpressionWithPredicate(pred)) {
+            return true;
+        }
+
+        if (m_right != null && m_right.hasAnySubexpressionWithPredicate(pred)) {
+            return true;
+        }
+
+        if (m_args != null) {
+            for (AbstractExpression argument : m_args) {
+                if (argument.hasAnySubexpressionWithPredicate(pred)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Convenience method for determining whether an Expression object should have a child
      * Expression on its RIGHT side. The follow types of Expressions do not need a right child:
      *      OPERATOR_NOT
@@ -980,15 +1115,23 @@ public abstract class AbstractExpression implements JSONString, Cloneable {
      */
     public abstract void finalizeValueTypes();
 
-    /** Do the recursive part of finalizeValueTypes as requested. */
+    /**
+     * Do the recursive part of finalizeValueTypes as requested. Note that this
+     * updates the content non-determinism state.
+     */
     protected final void finalizeChildValueTypes() {
-        if (m_left != null)
+        if (m_left != null) {
             m_left.finalizeValueTypes();
-        if (m_right != null)
+            updateContentDeterminismMessage(m_left.getContentDeterminismMessage());
+        }
+        if (m_right != null) {
             m_right.finalizeValueTypes();
+            updateContentDeterminismMessage(m_right.getContentDeterminismMessage());
+        }
         if (m_args != null) {
             for (AbstractExpression argument : m_args) {
                 argument.finalizeValueTypes();
+                updateContentDeterminismMessage(argument.getContentDeterminismMessage());
             }
         }
     }
@@ -1015,4 +1158,99 @@ public abstract class AbstractExpression implements JSONString, Cloneable {
 
     public abstract String explain(String impliedTableName);
 
+    public static boolean hasInlineVarType(AbstractExpression expr) {
+        VoltType type = expr.getValueType();
+        int size = expr.getValueSize();
+        boolean inBytes = expr.getInBytes();
+
+        switch(type) {
+        case STRING:
+            if (inBytes && size < 64) {
+                return true;
+            }
+            if (!inBytes && size < 16) {
+                return true;
+            }
+            break;
+        case VARBINARY:
+            if (size < 64) {
+                return true;
+            }
+            break;
+        default:
+            break;
+        }
+
+        return false;
+    }
+
+    /**
+     * Return true iff the given expression usable as part of an index expression.
+     * If false, put the tail of an error message in the string buffer.  The
+     * string buffer will be initialized with the name of the index.
+     *
+     * @param expr The expression to check
+     * @param msg  The StringBuffer to pack with the error message tail.
+     * @return true iff the expression can be part of an index.
+     */
+    private boolean isIndexableExpression(StringBuffer msg) {
+        if (containsFunctionById(FunctionSQL.voltGetCurrentTimestampId())) {
+            msg.append("cannot include the function NOW or CURRENT_TIMESTAMP.");
+            return false;
+        } else if (!findAllSubexpressionsOfClass(SelectSubqueryExpression.class).isEmpty()) {
+            // There may not be any of these in HSQL1.9.3b.  However, in
+            // HSQL2.3.2 subqueries are stored as expressions.  So, we may
+            // find some here.  We will keep it here for the moment.
+            msg.append(String.format("with subquery sources is not supported."));
+            return false;
+        } else if (!findAllSubexpressionsOfClass(AggregateExpression.class).isEmpty()) {
+            msg.append("with aggregate expression(s) is not supported.");
+            return false;
+        } else {
+            return true;
+        }
+    }
+
+    /**
+     * Return true iff the all of the expressions in the list can be part
+     * of an index expression.  As with isIndexableExpression, the StringBuffer
+     * parameter, msg, contains the name of the index.  Error messages
+     * should be appended to it.
+     *
+     * @param checkList
+     * @param msg
+     * @return
+     */
+    public static boolean areIndexableExpressions(List<AbstractExpression> checkList, StringBuffer msg) {
+        for (AbstractExpression expr : checkList) {
+            if (!expr.isIndexableExpression(msg)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * This function will recursively find any function expression with ID functionId.
+     * If found, return true. Otherwise, return false.
+     *
+     * @param expr
+     * @param functionId
+     * @return
+     */
+    private boolean containsFunctionById(int functionId) {
+        if (this instanceof AbstractValueExpression) {
+            return false;
+        }
+
+        List<AbstractExpression> functionsList = findAllSubexpressionsOfClass(FunctionExpression.class);
+        for (AbstractExpression funcExpr: functionsList) {
+            assert(funcExpr instanceof FunctionExpression);
+            if (((FunctionExpression)funcExpr).hasFunctionId(functionId)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }

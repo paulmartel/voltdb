@@ -3,7 +3,7 @@
 
     var iVoltDBConfig = (function () {
 
-        this.GetDefaultServerIP = function() {
+        this.GetDefaultServerIP = function () {
             return window.location.hostname;
         };
 
@@ -12,10 +12,11 @@
         };
 
         this.GetPortId = function () {
-            return window.location.port;
+            return window.location.port || 8080;
         };
     });
 
     window.VoltDBConfig = VoltDBConfig = new iVoltDBConfig();
 
 })(window);
+    

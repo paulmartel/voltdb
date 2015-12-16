@@ -32,47 +32,76 @@ import org.voltdb.client.NoConnectionsException;
 import org.voltdb.client.ProcCallException;
 import org.voltdb.client.ProcedureCallback;
 import org.voltdb.compiler.VoltProjectBuilder;
+import org.voltdb.compiler.VoltProjectBuilder.RoleInfo;
+import org.voltdb.compiler.VoltProjectBuilder.UserInfo;
 
 public class TestQueryTimeout extends RegressionSuite {
 
-    private static final int TIMEOUT = 1500;
-//    private static String ERRORMSG = String.format(
-//            "A SQL query was terminated after %.2f seconds", TIMEOUT / 1000.0);
+    private static final int TIMEOUT = 1000;
 
     // DEBUG build of EE runs much slower, so the timing part is not deterministic.
     private static String ERRORMSG = "A SQL query was terminated after";
 
+    private static final String INITIAL_STATUS = "";
+    private String m_errorStatusString;
+
+    ProcedureCallback m_callback = new ProcedureCallback() {
+        @Override
+        public void clientCallback(ClientResponse clientResponse) throws Exception {
+            m_errorStatusString = INITIAL_STATUS;
+            if (clientResponse.getStatus() != ClientResponse.SUCCESS) {
+                m_errorStatusString = clientResponse.getStatusString();
+            }
+        }
+    };
+
+    private void checkCallbackTimeoutError(String errorMsg) {
+        assertTrue(m_errorStatusString.contains(errorMsg));
+    }
+
+    private void checkCallbackSuccess() {
+        assertEquals(INITIAL_STATUS, m_errorStatusString);
+    }
+
     private void loadData(Client client, String tb, int scale)
             throws NoConnectionsException, IOException, ProcCallException {
-        ProcedureCallback callback = new ProcedureCallback() {
-            @Override
-            public void clientCallback(ClientResponse clientResponse)
-                    throws Exception {
-                if (clientResponse.getStatus() != ClientResponse.SUCCESS) {
-                    throw new RuntimeException("Failed with response: " + clientResponse.getStatusString());
-                }
-            }
-        };
-
         for (int i = 0; i < scale; i++) {
-            client.callProcedure(callback, tb + ".insert", i, "MA", i % 6);
+            client.callProcedure(m_callback, tb + ".insert", i, "MA", i % 6);
         }
         System.out.println("Finish loading " + scale + " rows for table " + tb);
     }
 
+    private void truncateData(Client client, String tb)
+            throws NoConnectionsException, IOException, ProcCallException {
+        client.callProcedure("@AdHoc", "Truncate table " + tb);
+        validateTableOfScalarLongs(client, "Select count(*) from " + tb, new long[]{0});
+    }
+
+    private void loadTables(Client client, int scaleP, int scaleR)
+            throws IOException, ProcCallException, InterruptedException {
+        loadData(client, "P1", scaleP);
+        loadData(client, "R1", scaleR);
+        client.drain();
+    }
+
+    private void truncateTables(Client client)
+            throws IOException, ProcCallException, InterruptedException {
+        truncateData(client, "P1");
+        truncateData(client, "R1");
+    }
+
     public void testReplicatedProcTimeout() throws IOException, ProcCallException, InterruptedException {
-        if (isValgrind()) {
-            // Disable the memcheck for this test, it takes too long
+        if (isValgrind() || isDebug()) {
+            // Disable the memcheck/debug for this test, it takes too long
             return;
         }
-
         System.out.println("test replicated table procedures timeout...");
 
+        m_username = "userWithAllProc";
+        m_password = "password";
         Client client = this.getClient();
-        loadData(client, "R1", 5000);
-        client.drain();
+        loadTables(client, 0, 5000);
 
-        client.callProcedure("@SystemInformation", "DEPLOYMENT");
         checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
 
         //
@@ -103,20 +132,17 @@ public class TestQueryTimeout extends RegressionSuite {
     }
 
     public void testPartitionedProcTimeout() throws IOException, ProcCallException, InterruptedException {
-        if (isValgrind()) {
-            // Disable the memcheck for this test, it takes too long
+        if (isValgrind() || isDebug()) {
+            // Disable the memcheck/debug for this test, it takes too long
             return;
         }
-
         System.out.println("test partitioned table procedures timeout...");
 
+        m_username = "userWithAllProc";
+        m_password = "password";
         Client client = this.getClient();
+        loadTables(client, 10000, 3000);
 
-        loadData(client, "P1", 10000);
-        loadData(client, "R1", 3000);
-        client.drain();
-
-        client.callProcedure("@SystemInformation", "DEPLOYMENT");
         checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
 
         //
@@ -145,6 +171,267 @@ public class TestQueryTimeout extends RegressionSuite {
         }
     }
 
+    final String PROMPTMSG = " is supposed to timed out, but succeed eventually!";
+
+    private void checkTimeoutIncreasedProcSucceed(boolean sync, Client client, String procName, Object...params)
+            throws IOException, ProcCallException, InterruptedException {
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+
+        try {
+            client.callProcedure(procName, params);
+            fail(procName + PROMPTMSG);
+        } catch(Exception ex) {
+            assertTrue(ex.getMessage().contains(ERRORMSG));
+        }
+
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+
+        // increase the individual timeout value in order to succeed running this long procedure
+        if (sync) {
+            try {
+                client.callProcedureWithTimeout(TIMEOUT*50, procName, params);
+            } catch(Exception ex) {
+                System.err.println(ex.getMessage());
+                fail(procName + " is supposed to succeed!");
+            }
+        } else {
+            client.callProcedureWithTimeout(m_callback, TIMEOUT*50, procName, params);
+            client.drain();
+            checkCallbackSuccess();
+        }
+
+        // check the global timeout value again
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+
+        // run the same procedure again to verify the global timeout value still applies
+        try {
+            client.callProcedure(procName, params);
+            fail(procName + PROMPTMSG);
+        } catch(Exception ex) {
+            assertTrue(ex.getMessage().contains(ERRORMSG));
+        }
+
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+    }
+
+    private void checkTimeoutIncreasedProcFailed(boolean sync, Client client, String procName, Object...params)
+            throws IOException, ProcCallException, InterruptedException {
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+
+        try {
+            client.callProcedure(procName, params);
+            fail(procName + PROMPTMSG);
+        } catch(Exception ex) {
+            assertTrue(ex.getMessage().contains(ERRORMSG));
+        }
+
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+
+        // increase the individual timeout value in order to succeed running this long procedure
+        // However, for non-admin user, timeout value can not override system timeout value.
+        if (sync) {
+            try {
+                client.callProcedureWithTimeout(TIMEOUT*50, procName, params);
+                fail(procName + PROMPTMSG);
+            } catch(Exception ex) {
+                assertTrue(ex.getMessage().contains(ERRORMSG));
+            }
+        } else {
+            client.callProcedureWithTimeout(m_callback, TIMEOUT*50, procName, params);
+            client.drain();
+            checkCallbackTimeoutError(ERRORMSG);
+        }
+
+        // check the global timeout value again
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+
+        // run the same procedure again to verify the global timeout value still applies
+        try {
+            client.callProcedure(procName, params);
+            fail(procName + PROMPTMSG);
+        } catch(Exception ex) {
+            assertTrue(ex.getMessage().contains(ERRORMSG));
+        }
+
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+    }
+
+    private void checkTimeoutDecreaseProcFailed(boolean sync, Client client, String procName, Object...params)
+            throws IOException, ProcCallException, InterruptedException {
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+
+        try {
+            client.callProcedure(procName, params);
+        } catch(Exception ex) {
+            fail(procName + " is supposed to succeed, but failed with message +\n" + ex.getMessage());
+        }
+
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+
+        // decrease the individual timeout value in order to timeout the running this long procedure
+        if (sync) {
+            try {
+                client.callProcedureWithTimeout(TIMEOUT / 500, procName, params);
+                fail(procName + PROMPTMSG);
+            } catch(Exception ex) {
+                assertTrue(ex.getMessage().contains(ERRORMSG));
+            }
+        } else {
+            client.callProcedureWithTimeout(m_callback, TIMEOUT / 500, procName, params);
+            client.drain();
+            checkCallbackTimeoutError(ERRORMSG);;
+        }
+
+        // check the global timeout value again
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+
+        // run the same procedure again to verify the global timeout value still applies
+        try {
+            client.callProcedure(procName, params);
+        } catch(Exception ex) {
+            fail(procName + " is supposed to succeed!");
+        }
+
+        checkDeploymentPropertyValue(client, "querytimeout", Integer.toString(TIMEOUT));
+    }
+
+    private void checkIndividualProcTimeout(Client client, boolean isAdmin)
+            throws IOException, ProcCallException, InterruptedException {
+        // negative tests on the timeout value
+        subtestNegativeIndividualProcTimeout(client);
+
+        final String longRunningCrossJoinAggReplicated =
+                "SELECT t1.contestant_number, t2.state, COUNT(*) "
+                        + "FROM R1 t1, R1 t2 "
+                        + "GROUP BY t1.contestant_number, t2.state;";
+
+        final String longRunningCrossJoinAggPartitioned =
+                "SELECT t1.contestant_number, t2.state, COUNT(*) "
+                        + "FROM P1 t1, R1 t2 "
+                        + "GROUP BY t1.contestant_number, t2.state;";
+
+
+        boolean syncs[] = {true, false};
+        for (boolean sync : syncs) {
+            System.out.println("Testing " + (sync ? "synchronously": "asynchronously") + "  call");
+            // truncate the data
+            truncateTables(client);
+            // load more data
+            loadTables(client, 10000, 3000);
+
+            if (isAdmin) {
+                checkTimeoutIncreasedProcSucceed(sync, client, "SPPartitionReadOnlyProc", 1);
+                checkTimeoutIncreasedProcSucceed(sync, client, "PartitionReadOnlyProc");
+                checkTimeoutIncreasedProcSucceed(sync, client, "ReplicatedReadOnlyProc");
+                checkTimeoutIncreasedProcSucceed(sync, client, "@AdHoc", longRunningCrossJoinAggReplicated);
+                checkTimeoutIncreasedProcSucceed(sync, client, "@AdHoc", longRunningCrossJoinAggPartitioned);
+                checkTimeoutIncreasedProcSucceed(sync, client, "AdHocPartitionReadOnlyProc");
+                // first replicated read will be treated as READ ONLY
+                checkTimeoutIncreasedProcSucceed(sync, client, "ReplicatedReadWriteProc");
+
+            } else {
+                checkTimeoutIncreasedProcFailed(sync, client, "SPPartitionReadOnlyProc", 1);
+                checkTimeoutIncreasedProcFailed(sync, client, "PartitionReadOnlyProc");
+                checkTimeoutIncreasedProcFailed(sync, client, "ReplicatedReadOnlyProc");
+                checkTimeoutIncreasedProcFailed(sync, client, "@AdHoc", longRunningCrossJoinAggReplicated);
+                checkTimeoutIncreasedProcFailed(sync, client, "@AdHoc", longRunningCrossJoinAggPartitioned);
+                checkTimeoutIncreasedProcFailed(sync, client, "AdHocPartitionReadOnlyProc");
+                // first replicated read will be treated as READ ONLY
+                checkTimeoutIncreasedProcFailed(sync, client, "ReplicatedReadWriteProc");
+            }
+
+            // write procedure no timing out
+            checkNoTimingOutWriteProcedure(sync, client, "ReplicatedWriteReadProc");
+            checkNoTimingOutWriteProcedure(sync, client, "PartitionReadWriteProc");
+            checkNoTimingOutWriteProcedure(sync, client, "PartitionWriteReadProc");
+
+
+            // truncate the data
+            truncateTables(client);
+            loadTables(client, 1000, 300);
+
+            checkTimeoutDecreaseProcFailed(sync, client, "SPPartitionReadOnlyProc", 1);
+            checkTimeoutDecreaseProcFailed(sync, client, "PartitionReadOnlyProc");
+            checkTimeoutDecreaseProcFailed(sync, client, "ReplicatedReadOnlyProc");
+            checkTimeoutDecreaseProcFailed(sync, client, "@AdHoc", longRunningCrossJoinAggReplicated);
+            checkTimeoutDecreaseProcFailed(sync, client, "@AdHoc", longRunningCrossJoinAggPartitioned);
+            checkTimeoutDecreaseProcFailed(sync, client, "AdHocPartitionReadOnlyProc");
+            // first replicated read will be treated as READ ONLY
+            checkTimeoutDecreaseProcFailed(sync, client, "ReplicatedReadWriteProc");
+            // write procedure no timing out
+            checkNoTimingOutWriteProcedure(sync, client, "ReplicatedWriteReadProc");
+            checkNoTimingOutWriteProcedure(sync, client, "PartitionReadWriteProc");
+            checkNoTimingOutWriteProcedure(sync, client, "PartitionWriteReadProc");
+
+            // truncate the data
+            truncateTables(client);
+        }
+
+    }
+
+    public void testIndividualProcTimeout() throws IOException, ProcCallException, InterruptedException {
+        if (isValgrind() || isDebug()) {
+            // Disable the memcheck/debug for this test, it takes too long
+            return;
+        }
+        Client client;
+
+        m_username = "adminUser";
+        m_password = "password";
+        client = getClient();
+        checkIndividualProcTimeout(client, true);
+
+        m_username = "userWithAllProc";
+        m_password = "password";
+        client = getClient();
+        checkIndividualProcTimeout(client, false);
+    }
+
+    private void subtestNegativeIndividualProcTimeout(Client client) throws IOException, ProcCallException, InterruptedException {
+        // negative timeout value
+        try {
+            client.callProcedureWithTimeout(TIMEOUT * -1, "PartitionReadOnlyProc");
+            fail();
+        } catch (Exception ex) {
+            assertTrue(ex.getMessage().contains("Timeout value can't be negative"));
+        }
+
+        try {
+            client.callProcedureWithTimeout(m_callback, TIMEOUT * -1, "PartitionReadOnlyProc");
+            client.drain();
+            fail();
+        } catch (Exception ex) {
+            assertTrue(ex.getMessage().contains("Timeout value can't be negative"));
+        }
+
+        // Integer overflow
+        try {
+            client.callProcedureWithTimeout(TIMEOUT * Integer.MAX_VALUE, "PartitionReadOnlyProc");
+            fail();
+        } catch (Exception ex) {
+            assertTrue(ex.getMessage().contains("Timeout value can't be negative"));
+        }
+
+        // underflow, asynchronously should be on the same path...
+    }
+
+    private void checkNoTimingOutWriteProcedure(boolean sync, Client client, String procName, Object...params)
+            throws IOException, ProcCallException, InterruptedException {
+
+        if (sync) {
+            try {
+                client.callProcedureWithTimeout(TIMEOUT / 500, procName, params);
+            } catch(Exception ex) {
+                System.err.println(ex.getMessage());
+                fail(procName + " is supposed to succeed!");
+            }
+        } else {
+            client.callProcedureWithTimeout(m_callback, TIMEOUT / 500, procName, params);
+            client.drain();
+            checkCallbackSuccess();
+        }
+    }
+
     //
     // Suite builder boilerplate
     //
@@ -158,7 +445,9 @@ public class TestQueryTimeout extends RegressionSuite {
         org.voltdb_testprocs.regressionsuites.querytimeout.ReplicatedWriteReadProc.class,
         org.voltdb_testprocs.regressionsuites.querytimeout.PartitionReadOnlyProc.class,
         org.voltdb_testprocs.regressionsuites.querytimeout.PartitionReadWriteProc.class,
-        org.voltdb_testprocs.regressionsuites.querytimeout.PartitionWriteReadProc.class
+        org.voltdb_testprocs.regressionsuites.querytimeout.PartitionWriteReadProc.class,
+        org.voltdb_testprocs.regressionsuites.querytimeout.SPPartitionReadOnlyProc.class,
+        org.voltdb_testprocs.regressionsuites.querytimeout.AdHocPartitionReadOnlyProc.class
     };
 
     static public junit.framework.Test suite() {
@@ -186,8 +475,21 @@ public class TestQueryTimeout extends RegressionSuite {
             assertFalse(true);
         }
         project.addProcedures(PROCEDURES);
-
         project.setQueryTimeout(TIMEOUT);
+
+        UserInfo users[] = new UserInfo[] {
+                new UserInfo("adminUser", "password", new String[] {"AdMINISTRATOR"}),
+                new UserInfo("userWithAllProc", "password", new String[] {"GroupWithAllProcPerm"})
+        };
+        project.addUsers(users);
+
+        RoleInfo groups[] = new RoleInfo[] {
+                new RoleInfo("GroupWithAllProcPerm", true, true, false, true, true, true)
+        };
+        project.addRoles(groups);
+        // suite defines its own ADMINISTRATOR user
+        project.setSecurityEnabled(true, false);
+
         boolean success;
 
         config = new LocalCluster("querytimeout-onesite.jar", 1, 1, 0, BackendTarget.NATIVE_EE_JNI);

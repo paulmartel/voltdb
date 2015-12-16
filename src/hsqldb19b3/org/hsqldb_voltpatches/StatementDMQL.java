@@ -44,6 +44,9 @@ import org.hsqldb_voltpatches.persist.HsqlDatabaseProperties;
 import org.hsqldb_voltpatches.result.Result;
 import org.hsqldb_voltpatches.result.ResultConstants;
 import org.hsqldb_voltpatches.result.ResultMetaData;
+/// We DO NOT reorganize imports in hsql code. And we try to keep these structured comment in place.
+import org.hsqldb_voltpatches.types.NumberType;
+// End of VoltDB extension
 
 /**
  * Statement implementation for DML and base DQL statements.
@@ -182,6 +185,7 @@ public abstract class StatementDMQL extends Statement {
         }
     }
 
+    @Override
     public Result execute(Session session) {
 
         Result result = getAccessRightsResult(session);
@@ -230,6 +234,7 @@ public abstract class StatementDMQL extends Statement {
     /**
      * For the creation of the statement
      */
+    @Override
     public void setGeneratedColumnInfo(int generate, ResultMetaData meta) {
 
         // can support INSERT_SELECT also
@@ -306,6 +311,7 @@ public abstract class StatementDMQL extends Statement {
         return values;
     }
 
+    @Override
     public boolean hasGeneratedColumns() {
         return generatedIndexes != null;
     }
@@ -361,6 +367,7 @@ public abstract class StatementDMQL extends Statement {
         }
     }
 
+    @Override
     public void clearVariables() {
 
         isValid            = false;
@@ -510,6 +517,7 @@ public abstract class StatementDMQL extends Statement {
      * Returns the metadata, which is empty if the CompiledStatement does not
      * generate a Result.
      */
+    @Override
     public ResultMetaData getResultMetaData() {
 
         switch (type) {
@@ -531,6 +539,7 @@ public abstract class StatementDMQL extends Statement {
     /**
      * Returns the metadata for the placeholder parameters.
      */
+    @Override
     public ResultMetaData getParametersMetaData() {
         return parameterMetaData;
     }
@@ -599,6 +608,7 @@ public abstract class StatementDMQL extends Statement {
     /**
      * Retrieves a String representation of this object.
      */
+    @Override
     public String describe(Session session) {
 
         try {
@@ -656,10 +666,9 @@ public abstract class StatementDMQL extends Statement {
                 appendColumns(sb, updateColumnMap).append('\n');
                 appendTable(sb).append('\n');
                 appendCondition(session, sb);
-                sb.append(targetRangeVariables[0].describe(session)).append(
-                    '\n');
-                sb.append(targetRangeVariables[1].describe(session)).append(
-                    '\n');
+                for (RangeVariable trv : targetRangeVariables) {
+                    sb.append(trv.describe(session)).append('\n');
+                }
                 appendParms(sb).append('\n');
                 appendSubqueries(session, sb).append(']');
 
@@ -670,10 +679,9 @@ public abstract class StatementDMQL extends Statement {
                 sb.append('[').append('\n');
                 appendTable(sb).append('\n');
                 appendCondition(session, sb);
-                sb.append(targetRangeVariables[0].describe(session)).append(
-                    '\n');
-                sb.append(targetRangeVariables[1].describe(session)).append(
-                    '\n');
+                for (RangeVariable trv : targetRangeVariables) {
+                    sb.append(trv.describe(session)).append('\n');
+                }
                 appendParms(sb).append('\n');
                 appendSubqueries(session, sb).append(']');
 
@@ -692,12 +700,9 @@ public abstract class StatementDMQL extends Statement {
                 appendColumns(sb, updateColumnMap).append('\n');
                 appendTable(sb).append('\n');
                 appendCondition(session, sb);
-                sb.append(targetRangeVariables[0].describe(session)).append(
-                    '\n');
-                sb.append(targetRangeVariables[1].describe(session)).append(
-                    '\n');
-                sb.append(targetRangeVariables[2].describe(session)).append(
-                    '\n');
+                for (RangeVariable trv : targetRangeVariables) {
+                    sb.append(trv.describe(session)).append('\n');
+                }
                 appendParms(sb).append('\n');
                 appendSubqueries(session, sb).append(']');
 
@@ -807,8 +812,10 @@ public abstract class StatementDMQL extends Statement {
                                      "]\n");
     }
 
+    @Override
     public void resolve() {}
 
+    @Override
     public RangeVariable[] getRangeVariables() {
         return rangeVariables;
     }
@@ -921,18 +928,51 @@ public abstract class StatementDMQL extends Statement {
                     queryExpr.getLeftQueryExpression(), parameters, session);
             VoltXMLElement rightExpr = voltGetXMLExpression(
                     queryExpr.getRightQueryExpression(), parameters, session);
+
+            // parameters
+            voltAppendParameters(session, unionExpr, parameters);
+
+            // Limit/Offset
+            List<VoltXMLElement> limitOffsetXml = voltGetLimitOffsetXMLFromSortAndSlice(session, queryExpr.sortAndSlice);
+            for (VoltXMLElement elem : limitOffsetXml) {
+                unionExpr.children.add(elem);
+            }
+
+            // Order By
+            if (queryExpr.sortAndSlice.getOrderLength() > 0) {
+                List<Expression> displayCols = getDisplayColumnsForSetOp(queryExpr);
+                java.util.Set<Integer> ignoredColsIndexes = new java.util.HashSet<Integer>();
+
+                VoltXMLElement orderCols = new VoltXMLElement("ordercolumns");
+                unionExpr.children.add(orderCols);
+                for (int i=0; i < queryExpr.sortAndSlice.exprList.size(); ++i) {
+                    Expression e = (Expression) queryExpr.sortAndSlice.exprList.get(i);
+                    assert(e.getLeftNode() != null);
+                    // Get the display column with a corresponding index
+                    int index = e.getLeftNode().queryTableColumnIndex;
+                    assert(index < displayCols.size());
+                    Expression column = displayCols.get(index);
+                    e.setLeftNode(column);
+                    VoltXMLElement xml = e.voltGetXML(session, displayCols, ignoredColsIndexes, i);
+                    orderCols.children.add(xml);
+                }
+            }
+
             /**
-             * Try to merge parent and the child nodes for UNION and INTERSECT (ALL) set operation.
+             * Try to merge parent and the child nodes for UNION and INTERSECT (ALL) set operation
+             * only if they don't have their own limit/offset/order by clauses
              * In case of EXCEPT(ALL) operation only the left child can be merged with the parent in order to preserve
              * associativity - (Select1 EXCEPT Select2) EXCEPT Select3 vs. Select1 EXCEPT (Select2 EXCEPT Select3)
              */
-            if ("union".equalsIgnoreCase(leftExpr.name) &&
+            boolean canMergeLeft = !hasLimitOrOrder(leftExpr);
+            if (canMergeLeft && "union".equalsIgnoreCase(leftExpr.name) &&
                     queryExpr.operatorName().equalsIgnoreCase(leftExpr.attributes.get("uniontype"))) {
                 unionExpr.children.addAll(leftExpr.children);
             } else {
                 unionExpr.children.add(leftExpr);
             }
-            if (exprType != QueryExpression.EXCEPT && exprType != QueryExpression.EXCEPT_ALL &&
+            boolean canMergeRight = !hasLimitOrOrder(rightExpr);
+            if (canMergeRight && exprType != QueryExpression.EXCEPT && exprType != QueryExpression.EXCEPT_ALL &&
                 "union".equalsIgnoreCase(rightExpr.name) &&
                 queryExpr.operatorName().equalsIgnoreCase(rightExpr.attributes.get("uniontype"))) {
                 unionExpr.children.addAll(rightExpr.children);
@@ -942,7 +982,39 @@ public abstract class StatementDMQL extends Statement {
             return unionExpr;
         } else {
             throw new org.hsqldb_voltpatches.HSQLInterface.HSQLParseException(
-                    queryExpr.operatorName() + "  tuple set operator is not supported.");
+                    queryExpr.operatorName() + " tuple set operator is not supported.");
+        }
+    }
+
+    /**
+     * Return true if the input element itself contains one of the limit/offset/ordercolumns elements
+     * @param xmlElement
+     */
+    private static boolean hasLimitOrOrder(VoltXMLElement xmlElement) {
+        String names[] = {"limit", "offset", "ordercolumns"};
+        for (String name : names) {
+            List<VoltXMLElement> elements = xmlElement.findChildren(name);
+            if (!elements.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Return a list of the display columns for the left most statement from a set op
+     * @return
+     */
+    private static List<Expression> getDisplayColumnsForSetOp(QueryExpression queryExpr) {
+        assert(queryExpr != null);
+        if (queryExpr.getLeftQueryExpression() == null) {
+            // end of recursion. This is a QuerySpecification
+            assert(queryExpr instanceof QuerySpecification);
+            QuerySpecification select = (QuerySpecification) queryExpr;
+            return select.displayCols;
+        } else {
+            // recurse
+            return getDisplayColumnsForSetOp(queryExpr.getLeftQueryExpression());
         }
     }
 
@@ -964,8 +1036,9 @@ public abstract class StatementDMQL extends Statement {
             try {
                 // read offset. it may be a parameter token.
                 VoltXMLElement offset = new VoltXMLElement("offset");
-                if (limitCondition.nodes[0].isParam == false) {
-                    Integer offsetValue = (Integer)limitCondition.nodes[0].getValue(session);
+                Expression offsetExpr = limitCondition.getLeftNode();
+                if (offsetExpr.isParam == false) {
+                    Integer offsetValue = (Integer)offsetExpr.getValue(session);
                     if (offsetValue > 0) {
                         Expression expr = new ExpressionValue(offsetValue,
                                 org.hsqldb_voltpatches.types.Type.SQL_BIGINT);
@@ -973,22 +1046,26 @@ public abstract class StatementDMQL extends Statement {
                         offset.attributes.put("offset", offsetValue.toString());
                     }
                 } else {
-                    offset.attributes.put("offset_paramid", limitCondition.nodes[0].getUniqueId(session));
+                    offset.attributes.put("offset_paramid", offsetExpr.getUniqueId(session));
                 }
                 result.add(offset);
 
-                // read limit. it may be a parameter token.
-                VoltXMLElement limit = new VoltXMLElement("limit");
-                if (limitCondition.nodes[1].isParam == false) {
-                    Integer limitValue = (Integer)limitCondition.nodes[1].getValue(session);
-                    Expression expr = new ExpressionValue(limitValue,
-                            org.hsqldb_voltpatches.types.Type.SQL_BIGINT);
-                    limit.children.add(expr.voltGetXML(session));
-                    limit.attributes.put("limit", limitValue.toString());
-                } else {
-                    limit.attributes.put("limit_paramid", limitCondition.nodes[1].getUniqueId(session));
+                // Limit may be null (offset with no limit), or
+                // it may be a parameter
+                Expression limitExpr = limitCondition.getRightNode();
+                if (limitExpr != null) {
+                    VoltXMLElement limit = new VoltXMLElement("limit");
+                    if (limitExpr.isParam == false) {
+                        Integer limitValue = (Integer)limitExpr.getValue(session);
+                        Expression expr = new ExpressionValue(limitValue,
+                                org.hsqldb_voltpatches.types.Type.SQL_BIGINT);
+                        limit.children.add(expr.voltGetXML(session));
+                        limit.attributes.put("limit", limitValue.toString());
+                    } else {
+                        limit.attributes.put("limit_paramid", limitExpr.getUniqueId(session));
+                    }
+                    result.add(limit);
                 }
-                result.add(limit);
 
             } catch (HsqlException ex) {
                 // XXX really?
@@ -1058,7 +1135,7 @@ public abstract class StatementDMQL extends Statement {
 
         java.util.ArrayList<Expression> orderByCols = new java.util.ArrayList<Expression>();
         java.util.ArrayList<Expression> groupByCols = new java.util.ArrayList<Expression>();
-        java.util.ArrayList<Expression> displayCols = new java.util.ArrayList<Expression>();
+        select.displayCols.clear();
         java.util.ArrayList<Pair<Integer, HsqlNameManager.SimpleName>> aliases =
                 new java.util.ArrayList<Pair<Integer, HsqlNameManager.SimpleName>>();
 
@@ -1127,7 +1204,7 @@ public abstract class StatementDMQL extends Statement {
             } else if (expr.opType != OpTypes.SIMPLE_COLUMN || (expr.isAggregate && expr.alias != null)) {
                 // Add aggregate aliases to the display columns to maintain
                 // the output schema column ordering.
-                displayCols.add(expr);
+                select.displayCols.add(expr);
             }
             // else, other simple columns are ignored. If others exist, maybe
             // volt infers a display column from another column collection?
@@ -1158,16 +1235,16 @@ public abstract class StatementDMQL extends Statement {
         if (havingCondition != null) {
             VoltXMLElement having = new VoltXMLElement("having");
             query.children.add(having);
-            VoltXMLElement havingExpr = havingCondition.voltGetXML(session, displayCols, ignoredColsIndexes, 0);
+            VoltXMLElement havingExpr = havingCondition.voltGetXML(session, select.displayCols, ignoredColsIndexes, 0);
             having.children.add(havingExpr);
         }
 
-        for (int jj=0; jj < displayCols.size(); ++jj) {
-            Expression expr = displayCols.get(jj);
+        for (int jj=0; jj < select.displayCols.size(); ++jj) {
+            Expression expr = select.displayCols.get(jj);
             if (ignoredColsIndexes.contains(jj)) {
                 continue;
             }
-            VoltXMLElement xml = expr.voltGetXML(session, displayCols, ignoredColsIndexes, jj);
+            VoltXMLElement xml = expr.voltGetXML(session, select.displayCols, ignoredColsIndexes, jj);
             cols.children.add(xml);
             assert(xml != null);
         }
@@ -1191,7 +1268,7 @@ public abstract class StatementDMQL extends Statement {
 
             for (int jj=0; jj < groupByCols.size(); ++jj) {
                 Expression expr = groupByCols.get(jj);
-                VoltXMLElement xml = expr.voltGetXML(session, displayCols, ignoredColsIndexes, jj);
+                VoltXMLElement xml = expr.voltGetXML(session, select.displayCols, ignoredColsIndexes, jj);
                 groupCols.children.add(xml);
             }
         }
@@ -1202,7 +1279,7 @@ public abstract class StatementDMQL extends Statement {
             query.children.add(orderCols);
             for (int jj=0; jj < orderByCols.size(); ++jj) {
                 Expression expr = orderByCols.get(jj);
-                VoltXMLElement xml = expr.voltGetXML(session, displayCols, ignoredColsIndexes, jj);
+                VoltXMLElement xml = expr.voltGetXML(session, select.displayCols, ignoredColsIndexes, jj);
                 orderCols.children.add(xml);
             }
         }
@@ -1301,7 +1378,11 @@ public abstract class StatementDMQL extends Statement {
             parameter.attributes.put("index", String.valueOf(index));
             ++index;
             parameter.attributes.put("id", expr.getUniqueId(session));
-            parameter.attributes.put("valuetype", Types.getTypeName(paramType.typeCode));
+            if (paramType == NumberType.SQL_NUMERIC_DEFAULT_INT) {
+                parameter.attributes.put("valuetype", "BIGINT");
+            } else {
+                parameter.attributes.put("valuetype", Types.getTypeName(paramType.typeCode));
+            }
             // Use of non-null nodeDataTypes for a DYNAMIC_PARAM is a voltdb extension to signal
             // that values passed to parameters such as the one in "col in ?" must be vectors.
             // So, it can just be forwarded as a boolean.

@@ -26,11 +26,12 @@ import java.util.Map;
 import org.json_voltpatches.JSONException;
 import org.json_voltpatches.JSONObject;
 import org.json_voltpatches.JSONStringer;
-import org.voltdb.VoltType;
 import org.voltdb.catalog.CatalogMap;
 import org.voltdb.catalog.Column;
 import org.voltdb.catalog.Database;
 import org.voltdb.expressions.AbstractExpression;
+import org.voltdb.expressions.AbstractSubqueryExpression;
+import org.voltdb.expressions.ConstantValueExpression;
 import org.voltdb.expressions.ExpressionUtil;
 import org.voltdb.expressions.TupleValueExpression;
 import org.voltdb.planner.parseinfo.StmtSubqueryScan;
@@ -45,7 +46,8 @@ public abstract class AbstractScanPlanNode extends AbstractPlanNode {
         PREDICATE,
         TARGET_TABLE_NAME,
         TARGET_TABLE_ALIAS,
-        SUBQUERY_INDICATOR;
+        SUBQUERY_INDICATOR,
+        PREDICATE_FALSE;
     }
 
     // Store the columns from the table as an internal NodeSchema
@@ -270,55 +272,72 @@ public abstract class AbstractScanPlanNode extends AbstractPlanNode {
         // These have the effect of repeatably generating the correct output
         // schema if called again and again, but also allowing the planner
         // to overwrite the inline projection and still have the right thing
-        // happen
+        // happen.
+        //
+        // Note that when an index scan is inlined into a join node (as with
+        // nested loop index joins), then there will be a project node inlined into
+        // the index scan node that determines which columns from the inner table
+        // are used as an output of the join, but that predicates evaluated against
+        // this table should use the complete schema of the table being scanned.
+        // See also the comments in NestLoopIndexPlanNode.resolveColumnIndexes.
+        // Related tickets: ENG-9389, ENG-9533.
         ProjectionPlanNode proj =
             (ProjectionPlanNode)getInlinePlanNode(PlanNodeType.PROJECTION);
-        if (proj != null)
-        {
+        if (proj != null) {
             // Does this operation needs to change complex expressions
             // into tuple value expressions with an column alias?
             // Is this always true for clone?  Or do we need a new method?
             m_outputSchema = proj.getOutputSchema().copyAndReplaceWithTVE();
             m_hasSignificantOutputSchema = false; // It's just a cheap knock-off of the projection's
         }
-        else
-        {
-            if (m_tableScanSchema.size() != 0)
-            {
-                // Order the scan columns according to the table schema
-                // before we stick them in the projection output
-                List<TupleValueExpression> scan_tves =
+        else if (m_tableScanSchema.size() != 0) {
+            // Order the scan columns according to the table schema
+            // before we stick them in the projection output
+            List<TupleValueExpression> scan_tves =
                     new ArrayList<TupleValueExpression>();
-                for (SchemaColumn col : m_tableScanSchema.getColumns())
-                {
-                    assert(col.getExpression() instanceof TupleValueExpression);
-                    scan_tves.addAll(ExpressionUtil.getTupleValueExpressions(col.getExpression()));
-                }
-                // and update their indexes against the table schema
-                for (TupleValueExpression tve : scan_tves)
-                {
-                    int index = tve.resolveColumnIndexesUsingSchema(m_tableSchema);
-                    tve.setColumnIndex(index);
-                }
-                m_tableScanSchema.sortByTveIndex();
-                // Create inline projection to map table outputs to scan outputs
-                ProjectionPlanNode projectionNode = new ProjectionPlanNode();
-                projectionNode.setOutputSchema(m_tableScanSchema);
-                addInlinePlanNode(projectionNode);
-                // a bit redundant but logically consistent
-                m_outputSchema = projectionNode.getOutputSchema().copyAndReplaceWithTVE();
-                m_hasSignificantOutputSchema = false; // It's just a cheap knock-off of the projection's
-            }
-            else
+            for (SchemaColumn col : m_tableScanSchema.getColumns())
             {
-                // just fill m_outputSchema with the table's columns
-                m_outputSchema = m_tableSchema.clone();
-                m_hasSignificantOutputSchema = true;
+                assert(col.getExpression() instanceof TupleValueExpression);
+                scan_tves.addAll(ExpressionUtil.getTupleValueExpressions(col.getExpression()));
             }
+            // and update their indexes against the table schema
+            for (TupleValueExpression tve : scan_tves)
+            {
+                int index = tve.resolveColumnIndexesUsingSchema(m_tableSchema);
+                tve.setColumnIndex(index);
+            }
+            m_tableScanSchema.sortByTveIndex();
+            // Create inline projection to map table outputs to scan outputs
+            ProjectionPlanNode projectionNode = new ProjectionPlanNode();
+            projectionNode.setOutputSchema(m_tableScanSchema);
+            addInlinePlanNode(projectionNode);
+            // a bit redundant but logically consistent
+            m_outputSchema = projectionNode.getOutputSchema().copyAndReplaceWithTVE();
+            m_hasSignificantOutputSchema = false; // It's just a cheap knock-off of the projection's
+        }
+        else {
+            // We come here if m_tableScanSchema is empty.
+            //
+            // m_tableScanSchema might be empty for cases like
+            //   select now from table;
+            // where there are no columns in the table that are accessed.
+            //
+            // Just fill m_outputSchema with the table's columns.
+            m_outputSchema = m_tableSchema.clone();
+            m_hasSignificantOutputSchema = true;
+        }
+
+        // Generate the output schema for subqueries
+        Collection<AbstractExpression> exprs = findAllExpressionsOfClass(AbstractSubqueryExpression.class);
+        for (AbstractExpression expr: exprs) {
+            ExpressionUtil.generateSubqueryExpressionOutputSchema(expr, db);
         }
 
         AggregatePlanNode aggNode = AggregatePlanNode.getInlineAggregationNode(this);
         if (aggNode != null) {
+            // generate its subquery output schema
+            aggNode.generateOutputSchema(db);
+
             m_outputSchema = aggNode.getOutputSchema().copyAndReplaceWithTVE();
             m_hasSignificantOutputSchema = true;
         }
@@ -380,6 +399,11 @@ public abstract class AbstractScanPlanNode extends AbstractPlanNode {
             limit.m_outputSchema = m_outputSchema.clone();
             limit.m_hasSignificantOutputSchema = false; // It's just another cheap knock-off
         }
+        // Resolve subquery expression indexes
+        Collection<AbstractExpression> exprs = findAllExpressionsOfClass(AbstractSubqueryExpression.class);
+        for (AbstractExpression expr: exprs) {
+            ExpressionUtil.resolveSubqueryExpressionColumnIndexes(expr);
+        }
 
         AggregatePlanNode aggNode = AggregatePlanNode.getInlineAggregationNode(this);
 
@@ -397,6 +421,9 @@ public abstract class AbstractScanPlanNode extends AbstractPlanNode {
         super.toJSONString(stringer);
 
         if (m_predicate != null) {
+            if (ConstantValueExpression.isBooleanFalse(m_predicate)) {
+                stringer.key(Members.PREDICATE_FALSE.name()).value("TRUE");
+            }
             stringer.key(Members.PREDICATE.name());
             stringer.value(m_predicate);
         }
@@ -431,8 +458,20 @@ public abstract class AbstractScanPlanNode extends AbstractPlanNode {
 
     protected String explainPredicate(String prefix) {
         if (m_predicate != null) {
-            return prefix + m_predicate.explain(m_targetTableName);
+            return prefix + m_predicate.explain(getTableNameForExplain());
         }
         return "";
     }
+
+    protected String getTableNameForExplain() {
+        return (m_targetTableAlias != null) ? m_targetTableAlias : m_targetTableName;
+    }
+
+    @Override
+    public Collection<AbstractExpression> findAllExpressionsOfClass(Class< ? extends AbstractExpression> aeClass) {
+        Collection<AbstractExpression> collected = super.findAllExpressionsOfClass(aeClass);
+        collected.addAll(ExpressionUtil.findAllExpressionsOfClass(m_predicate, aeClass));
+        return collected;
+    }
+
 }

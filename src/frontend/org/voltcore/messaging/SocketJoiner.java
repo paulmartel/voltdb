@@ -420,7 +420,8 @@ public class SocketJoiner {
             for (ServerSocketChannel ssc : m_listenerSockets) {
                 try {
                     ssc.close();
-                } catch (Exception e) {}
+                } catch (IOException e) {
+                }
             }
             m_listenerSockets.clear();
             try {
@@ -461,7 +462,7 @@ public class SocketJoiner {
         else if (!remoteAcceptsLocalVersion) {
             if (!VoltDB.instance().isCompatibleVersionString(remoteVersionString)) {
                 VoltDB.crashLocalVoltDB("Cluster contains nodes running VoltDB version " + remoteVersionString +
-                        " which is incompatbile with local version " + localVersionString + ".\n", false, null);
+                        " which is incompatibile with local version " + localVersionString + ".\n", false, null);
             }
         }
         activeVersions.add(remoteVersionString);
@@ -698,20 +699,23 @@ public class SocketJoiner {
         if (m_selector != null) {
             try {
                 m_selector.close();
-            } catch (Exception e) {}
+            } catch (IOException e) {
+            }
         }
         m_es.shutdownNow();
         m_es.awaitTermination(356, TimeUnit.DAYS);
         for (ServerSocketChannel ssc : m_listenerSockets) {
             try {
                 ssc.close();
-            } catch (Exception e) {}
+            } catch (IOException e) {
+            }
         }
         m_listenerSockets.clear();
         if (m_selector != null) {
             try {
                 m_selector.close();
-            } catch (Exception e) {}
+            } catch (IOException e) {
+            }
             m_selector = null;
         }
     }

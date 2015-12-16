@@ -34,6 +34,8 @@
 #include <cfloat>
 #include <limits>
 
+#include "boost/scoped_ptr.hpp"
+
 using namespace std;
 using namespace voltdb;
 
@@ -42,6 +44,10 @@ static const double floatDelta = 0.000000000001;
 
 class NValueTest : public Test {
     ThreadLocalPool m_pool;
+    boost::scoped_ptr<Pool> m_testPool;
+    boost::scoped_ptr<ExecutorContext> m_executorContext;
+    static PlannerDomRoot m_emptyRoot;
+
 public:
     string str;
     ValueType vt;
@@ -52,6 +58,8 @@ public:
     NValue viaDouble;
     NValue lower;
     NValue upper;
+
+    static PlannerDomValue emptyDom() { return m_emptyRoot.rootObject(); }
 
     void deserDecHelper()
     {
@@ -75,8 +83,19 @@ public:
         scaledDirect = (int64_t)(floatDirect * scale);
     }
 
+    ExecutorContext * getExecutorContextForTest(Pool* testPool)
+    {
+        m_testPool.reset(testPool);
+        ExecutorContext *newExec = new ExecutorContext(0, 0, NULL, NULL, testPool,
+                                                       (NValueArray*)NULL, (VoltDBEngine*)NULL,
+                                                       "", 0, NULL, NULL, 0);
+        m_executorContext.reset(newExec);
+        return m_executorContext.get();
+    }
 
 };
+// An empty JSON object to get simple (non-quantified) behavior from comparators
+PlannerDomRoot NValueTest::m_emptyRoot("{}");
 
 TEST_F(NValueTest, DeserializeDecimal)
 {
@@ -228,6 +247,83 @@ TEST_F(NValueTest, DeserializeDecimal)
     ASSERT_EQ(value, TTInt(static_cast<int64_t>(-12340000000000)));
     ASSERT_EQ(str, "-12.340000000000");
 
+    // Test to see that we round down appropriately.
+    deserDecValidator("0.8999999999994");
+    ASSERT_FALSE(nv.isNull());
+    ASSERT_EQ(vt, VALUE_TYPE_DECIMAL);
+    ASSERT_EQ(TTInt(0), ValuePeeker::peekDecimal(nv)/TTInt(NValue::kMaxScaleFactor));
+    ASSERT_EQ(TTInt((uint64_t)899999999999), ValuePeeker::peekDecimal(nv) % TTInt(NValue::kMaxScaleFactor));
+
+    // Test to see that we round up appropriately.
+    deserDecValidator("0.8999999999995");
+    ASSERT_FALSE(nv.isNull());
+    ASSERT_EQ(vt, VALUE_TYPE_DECIMAL);
+    ASSERT_EQ(TTInt(0), ValuePeeker::peekDecimal(nv)/TTInt(NValue::kMaxScaleFactor));
+    ASSERT_EQ(TTInt((uint64_t)900000000000), ValuePeeker::peekDecimal(nv) % TTInt(NValue::kMaxScaleFactor));
+
+    // Test to see that we round from the fractional
+    // part to a zero decimal part.
+    deserDecValidator("0.9999999999995");
+    ASSERT_FALSE(nv.isNull());
+    ASSERT_EQ(vt, VALUE_TYPE_DECIMAL);
+    ASSERT_EQ(TTInt(1), ValuePeeker::peekDecimal(nv)/TTInt(NValue::kMaxScaleFactor));
+    ASSERT_EQ(TTInt(0), ValuePeeker::peekDecimal(nv) % TTInt(NValue::kMaxScaleFactor));
+
+    // Test to see that we round from the fractional
+    // part to a non-zero decimal part.
+    deserDecValidator("99.9999999999995");
+    ASSERT_FALSE(nv.isNull());
+    ASSERT_EQ(vt, VALUE_TYPE_DECIMAL);
+    ASSERT_EQ(TTInt(100), ValuePeeker::peekDecimal(nv)/TTInt(NValue::kMaxScaleFactor));
+    ASSERT_EQ(TTInt(0), ValuePeeker::peekDecimal(nv) % TTInt(NValue::kMaxScaleFactor));
+
+    // Test to see that we round from the fractional
+    // part to a non-zero decimal part.
+    deserDecValidator("98.9999999999999");
+    ASSERT_FALSE(nv.isNull());
+    ASSERT_EQ(vt, VALUE_TYPE_DECIMAL);
+    ASSERT_EQ(TTInt(99), ValuePeeker::peekDecimal(nv)/TTInt(NValue::kMaxScaleFactor));
+    ASSERT_EQ(TTInt(0), ValuePeeker::peekDecimal(nv) % TTInt(NValue::kMaxScaleFactor));
+
+    // Test to see that we round down appropriately with a signed number.
+    deserDecValidator("-0.8999999999994");
+    ASSERT_FALSE(nv.isNull());
+    ASSERT_EQ(vt, VALUE_TYPE_DECIMAL);
+    ASSERT_EQ(TTInt(0), ValuePeeker::peekDecimal(nv)/TTInt(NValue::kMaxScaleFactor));
+    TTInt sfrac = ValuePeeker::peekDecimal(nv) % TTInt(NValue::kMaxScaleFactor);
+    TTInt sexpFrac("-899999999999");
+    ASSERT_EQ(sexpFrac, sfrac);
+
+    // Test to see that we round up appropriately with a signed number
+    deserDecValidator("-0.8999999999995");
+    ASSERT_FALSE(nv.isNull());
+    ASSERT_EQ(vt, VALUE_TYPE_DECIMAL);
+    ASSERT_EQ(TTInt(0), ValuePeeker::peekDecimal(nv)/TTInt(NValue::kMaxScaleFactor));
+    ASSERT_EQ(TTInt("-900000000000"), ValuePeeker::peekDecimal(nv) % TTInt(NValue::kMaxScaleFactor));
+
+    // Test to see that we round from the fractional
+    // part to a zero decimal part with a signed number.
+    deserDecValidator("-0.9999999999995");
+    ASSERT_FALSE(nv.isNull());
+    ASSERT_EQ(vt, VALUE_TYPE_DECIMAL);
+    ASSERT_EQ(TTInt("-1"), ValuePeeker::peekDecimal(nv)/TTInt(NValue::kMaxScaleFactor));
+    ASSERT_EQ(TTInt("0"), ValuePeeker::peekDecimal(nv) % TTInt(NValue::kMaxScaleFactor));
+
+    // Test to see that we round from the fractional
+    // part to a non-zero decimal part.
+    deserDecValidator("-99.9999999999995");
+    ASSERT_FALSE(nv.isNull());
+    ASSERT_EQ(vt, VALUE_TYPE_DECIMAL);
+    ASSERT_EQ(TTInt("-100"), ValuePeeker::peekDecimal(nv)/TTInt(NValue::kMaxScaleFactor));
+    ASSERT_EQ(TTInt("0"), ValuePeeker::peekDecimal(nv) % TTInt(NValue::kMaxScaleFactor));
+
+    // Test to see that we round from the fractional
+    // part to a non-zero decimal part.
+    deserDecValidator("-98.9999999999999");
+    ASSERT_FALSE(nv.isNull());
+    ASSERT_EQ(vt, VALUE_TYPE_DECIMAL);
+    ASSERT_EQ(TTInt("-99"), ValuePeeker::peekDecimal(nv)/TTInt(NValue::kMaxScaleFactor));
+    ASSERT_EQ(TTInt("0"), ValuePeeker::peekDecimal(nv) % TTInt(NValue::kMaxScaleFactor));
     // illegal deserializations
     try {
         // too few digits
@@ -275,6 +371,21 @@ TEST_F(NValueTest, DeserializeDecimal)
         ASSERT_EQ(0,1);
     }
     catch (SerializableEEException &e) {
+    }
+
+    try {
+        // This will round to a number which has
+        // 39 digits of precision, which is invalid.
+        nv = ValueFactory::getDecimalValueFromString("99999999999999999999999999.9999999999995999999");
+    } catch (SerializableEEException &e) {
+
+    }
+    try {
+        // This will round to a number which has
+        // 39 digits of precision, which is invalid.
+        nv = ValueFactory::getDecimalValueFromString("-99999999999999999999999999.9999999999995");
+    } catch (SerializableEEException &e) {
+
     }
 }
 
@@ -765,9 +876,7 @@ TEST_F(NValueTest, TestCastToDouble) {
 TEST_F(NValueTest, TestCastToString) {
     assert(ExecutorContext::getExecutorContext() == NULL);
     Pool* testPool = new Pool();
-    UndoQuantum* wantNoQuantum = NULL;
-    Topend* topless = NULL;
-    ExecutorContext* poolHolder = new ExecutorContext(0, 0, wantNoQuantum, topless, testPool, NULL, false, "", 0, NULL);
+    getExecutorContextForTest(testPool);
 
     NValue tinyInt = ValueFactory::getTinyIntValue(120);
     NValue smallInt = ValueFactory::getSmallIntValue(120);
@@ -808,8 +917,6 @@ TEST_F(NValueTest, TestCastToString) {
 
     // Make valgrind happy
     stringValue.free();
-    delete poolHolder;
-    delete testPool;
 }
 
 TEST_F(NValueTest, TestCastToDecimal) {
@@ -876,6 +983,38 @@ TEST_F(NValueTest, TestCastToDecimal) {
         caught = true;
     }
     EXPECT_TRUE(caught);
+}
+
+TEST_F(NValueTest, TestToString) {
+    assert(ExecutorContext::getExecutorContext() == NULL);
+    Pool* testPool = new Pool();
+    getExecutorContextForTest(testPool);
+
+    NValue tinyInt = ValueFactory::getTinyIntValue(120);
+    NValue smallInt = ValueFactory::getSmallIntValue(120);
+    NValue integer = ValueFactory::getIntegerValue(120);
+    NValue bigInt = ValueFactory::getBigIntValue(-64);
+    NValue doubleValue = ValueFactory::getDoubleValue(-32);
+    NValue stringValue = ValueFactory::getStringValue("数据库");
+    NValue binaryValue = ValueFactory::getBinaryValue("aa");
+    NValue decimalValue = ValueFactory::getDecimalValueFromString("10.22");
+    NValue timestamp = ValueFactory::getTimestampValue(99999999);
+    NValue nullValue = ValueFactory::getNullValue();
+
+    EXPECT_EQ(strcmp(bigInt.toString().c_str(), "-64"), 0);
+    EXPECT_EQ(strcmp(integer.toString().c_str(), "120"), 0);
+    EXPECT_EQ(strcmp(smallInt.toString().c_str(), "120"), 0);
+    EXPECT_EQ(strcmp(tinyInt.toString().c_str(), "120"), 0);
+    EXPECT_EQ(strcmp(doubleValue.toString().c_str(), "-3.2E1"), 0);
+    EXPECT_EQ(strcmp(decimalValue.toString().c_str(), "10.220000000000"), 0);
+    EXPECT_EQ(strcmp(stringValue.toString().c_str(), "数据库"), 0);
+    EXPECT_EQ(strcmp(binaryValue.toString().c_str(), "aa"), 0);
+    EXPECT_EQ(strcmp(timestamp.toString().c_str(), "1970-01-01 00:01:39.999999"), 0);
+    EXPECT_EQ(strcmp(nullValue.toString().c_str(), "null"), 0);
+
+    // Make valgrind happy
+    stringValue.free();
+    binaryValue.free();
 }
 
 //
@@ -2050,9 +2189,8 @@ TEST_F(NValueTest, TestSubstring)
 {
     assert(ExecutorContext::getExecutorContext() == NULL);
     Pool* testPool = new Pool();
-    UndoQuantum* wantNoQuantum = NULL;
-    Topend* topless = NULL;
-    ExecutorContext* poolHolder = new ExecutorContext(0, 0, wantNoQuantum, topless, testPool, NULL, false, "", 0, NULL);
+    getExecutorContextForTest(testPool);
+
     std::vector<std::string> testData;
     testData.push_back("abcdefg");
     testData.push_back("âbcdéfg");
@@ -2134,17 +2272,13 @@ TEST_F(NValueTest, TestSubstring)
         }
         testString.free();
     }
-    delete poolHolder;
-    delete testPool;
 }
 
 TEST_F(NValueTest, TestExtract)
 {
     assert(ExecutorContext::getExecutorContext() == NULL);
     Pool* testPool = new Pool();
-    UndoQuantum* wantNoQuantum = NULL;
-    Topend* topless = NULL;
-    ExecutorContext* poolHolder = new ExecutorContext(0, 0, wantNoQuantum, topless, testPool, NULL, false, "", 0, NULL);
+    getExecutorContextForTest(testPool);
 
     NValue result;
     NValue midSeptember = ValueFactory::getTimestampValue(1000000000000000);
@@ -2268,8 +2402,6 @@ TEST_F(NValueTest, TestExtract)
     result = longAgo.callUnary<FUNC_EXTRACT_SECOND>();
     EXPECT_EQ(0, result.compare(ValueFactory::getDecimalValueFromString(EXPECTED_SECONDS)));
 
-    delete poolHolder;
-    delete testPool;
 }
 
 static NValue streamNValueArrayintoInList(ValueType vt, NValue* nvalue, int length, Pool* testPool)
@@ -2337,10 +2469,7 @@ TEST_F(NValueTest, TestInList)
 {
     assert(ExecutorContext::getExecutorContext() == NULL);
     Pool* testPool = new Pool();
-    UndoQuantum* wantNoQuantum = NULL;
-    Topend* topless = NULL;
-    ExecutorContext* poolHolder =
-        new ExecutorContext(0, 0, wantNoQuantum, topless, testPool, NULL, false, "", 0, NULL);
+    getExecutorContextForTest(testPool);
 
     int int_set1[] = { 10, 2, -3 };
     int int_set2[] = { 0, 1, 100, 10000, 1000000 };
@@ -2393,14 +2522,14 @@ TEST_F(NValueTest, TestInList)
            ExpressionUtil::vectorFactory(VALUE_TYPE_INTEGER, int_constants_rhs2);
 
         in_expression =
-            ExpressionUtil::comparisonFactory(EXPRESSION_TYPE_COMPARE_IN,
+            ExpressionUtil::comparisonFactory(emptyDom(), EXPRESSION_TYPE_COMPARE_IN,
                                               int_constants_lhs1_1[kk],
                                               in_list_of_int_constants1);
         EXPECT_TRUE(in_expression->eval(NULL, NULL).isTrue());
         delete in_expression;
 
         in_expression =
-            ExpressionUtil::comparisonFactory(EXPRESSION_TYPE_COMPARE_IN,
+            ExpressionUtil::comparisonFactory(emptyDom(), EXPRESSION_TYPE_COMPARE_IN,
                                               int_constants_lhs1_2[kk],
                                               in_list_of_int_constants2);
         EXPECT_FALSE(in_expression->eval(NULL, NULL).isTrue());
@@ -2420,14 +2549,14 @@ TEST_F(NValueTest, TestInList)
            ExpressionUtil::vectorFactory(VALUE_TYPE_INTEGER, int_constants_rhs2);
 
         in_expression =
-            ExpressionUtil::comparisonFactory(EXPRESSION_TYPE_COMPARE_IN,
+            ExpressionUtil::comparisonFactory(emptyDom(), EXPRESSION_TYPE_COMPARE_IN,
                                               int_constants_lhs2_1[ll],
                                               in_list_of_int_constants2);
         EXPECT_TRUE(in_expression->eval(NULL, NULL).isTrue());
         delete in_expression;
 
         in_expression =
-            ExpressionUtil::comparisonFactory(EXPRESSION_TYPE_COMPARE_IN,
+            ExpressionUtil::comparisonFactory(emptyDom(), EXPRESSION_TYPE_COMPARE_IN,
                                               int_constants_lhs2_2[ll],
                                               in_list_of_int_constants1);
         EXPECT_FALSE(in_expression->eval(NULL, NULL).isTrue());
@@ -2486,14 +2615,14 @@ TEST_F(NValueTest, TestInList)
            ExpressionUtil::vectorFactory(VALUE_TYPE_VARCHAR, string_constants_rhs2);
 
         in_expression =
-            ExpressionUtil::comparisonFactory(EXPRESSION_TYPE_COMPARE_IN,
+            ExpressionUtil::comparisonFactory(emptyDom(), EXPRESSION_TYPE_COMPARE_IN,
                                               string_constants_lhs1_1[kk],
                                               in_list_of_string_constants1);
         EXPECT_TRUE(in_expression->eval(NULL, NULL).isTrue());
         delete in_expression;
 
         in_expression =
-            ExpressionUtil::comparisonFactory(EXPRESSION_TYPE_COMPARE_IN,
+            ExpressionUtil::comparisonFactory(emptyDom(), EXPRESSION_TYPE_COMPARE_IN,
                                               string_constants_lhs1_2[kk],
                                               in_list_of_string_constants2);
         EXPECT_FALSE(in_expression->eval(NULL, NULL).isTrue());
@@ -2513,22 +2642,19 @@ TEST_F(NValueTest, TestInList)
            ExpressionUtil::vectorFactory(VALUE_TYPE_VARCHAR, string_constants_rhs2);
 
         in_expression =
-            ExpressionUtil::comparisonFactory(EXPRESSION_TYPE_COMPARE_IN,
+            ExpressionUtil::comparisonFactory(emptyDom(), EXPRESSION_TYPE_COMPARE_IN,
                                               string_constants_lhs2_1[ll],
                                               in_list_of_string_constants2);
         EXPECT_TRUE(in_expression->eval(NULL, NULL).isTrue());
         delete in_expression;
 
         in_expression =
-            ExpressionUtil::comparisonFactory(EXPRESSION_TYPE_COMPARE_IN,
+            ExpressionUtil::comparisonFactory(emptyDom(), EXPRESSION_TYPE_COMPARE_IN,
                                               string_constants_lhs2_2[ll],
                                               in_list_of_string_constants1);
         EXPECT_FALSE(in_expression->eval(NULL, NULL).isTrue());
         delete in_expression;
     }
-
-    delete poolHolder;
-    delete testPool;
 }
 
 bool checkValueVector(vector<NValue> &values) {
@@ -2545,10 +2671,7 @@ bool checkValueVector(vector<NValue> &values) {
 TEST_F(NValueTest, TestDedupAndSort) {
     assert(ExecutorContext::getExecutorContext() == NULL);
     Pool* testPool = new Pool();
-    UndoQuantum* wantNoQuantum = NULL;
-    Topend* topless = NULL;
-    ExecutorContext* poolHolder =
-    new ExecutorContext(0, 0, wantNoQuantum, topless, testPool, NULL, false, "", 0, NULL);
+    getExecutorContextForTest(testPool);
 
     std::vector<NValue> vectorValues;
     NValue arrayValue;
@@ -2738,23 +2861,18 @@ TEST_F(NValueTest, TestDedupAndSort) {
     v2.free();
     v3.free();
     v4.free();
-    arrayValue.free();
 
     /////////////////////////////////////////////////////////////
     // Cleanup
     /////////////////////////////////////////////////////////////
-
-    delete poolHolder;
-    delete testPool;
+    arrayValue.free();
 }
 
 TEST_F(NValueTest, TestTimestampStringParse)
 {
     assert(ExecutorContext::getExecutorContext() == NULL);
     Pool* testPool = new Pool();
-    UndoQuantum* wantNoQuantum = NULL;
-    Topend* topless = NULL;
-    ExecutorContext* poolHolder = new ExecutorContext(0, 0, wantNoQuantum, topless, testPool, NULL, false, "", 0, NULL);
+    getExecutorContextForTest(testPool);
 
     bool failed = false;
     const char* trials[] = {
@@ -3012,17 +3130,13 @@ TEST_F(NValueTest, TestTimestampStringParse)
             break;
         }
     }
-    delete poolHolder;
-    delete testPool;
 }
 
 TEST_F(NValueTest, TestTimestampStringParseShort)
 {
     assert(ExecutorContext::getExecutorContext() == NULL);
     Pool* testPool = new Pool();
-    UndoQuantum* wantNoQuantum = NULL;
-    Topend* topless = NULL;
-    ExecutorContext* poolHolder = new ExecutorContext(0, 0, wantNoQuantum, topless, testPool, NULL, false, "", 0, NULL);
+    getExecutorContextForTest(testPool);
 
     std::string peekString;
 
@@ -3071,18 +3185,13 @@ TEST_F(NValueTest, TestTimestampStringParseShort)
         cout << "I have no idea what happen here " << exc.message() << " " << dateStr << endl;
         EXPECT_FALSE(true);
     }
-
-    delete poolHolder;
-    delete testPool;
 }
 
 TEST_F(NValueTest, TestTimestampStringParseWithLeadingAndTrailingSpaces)
 {
     assert(ExecutorContext::getExecutorContext() == NULL);
     Pool* testPool = new Pool();
-    UndoQuantum* wantNoQuantum = NULL;
-    Topend* topless = NULL;
-    ExecutorContext* poolHolder = new ExecutorContext(0, 0, wantNoQuantum, topless, testPool, NULL, false, "", 0, NULL);
+    getExecutorContextForTest(testPool);
 
     std::string peekString;
 
@@ -3217,9 +3326,240 @@ TEST_F(NValueTest, TestTimestampStringParseWithLeadingAndTrailingSpaces)
         cout << "I have no idea what happen here " << exc.message() << " " << dateStr << endl;
         EXPECT_FALSE(true);
     }
+}
 
-    delete poolHolder;
-    delete testPool;
+TEST_F(NValueTest, TestDateadd) {
+    assert(ExecutorContext::getExecutorContext() == NULL);
+    Pool* testPool = new Pool();
+    getExecutorContextForTest(testPool);
+
+    NValue result;
+    NValue interval = ValueFactory::getBigIntValue(1);
+    // 2001-09-09 01:46.40.000000
+    NValue midSeptember = ValueFactory::getTimestampValue(1000000000000000);
+
+    std::vector<NValue> args;
+    args.push_back(interval);
+    args.push_back(midSeptember);
+
+    int EXPECTED_YEAR = 2002;
+    result = NValue::call<FUNC_VOLT_DATEADD_YEAR>(args);
+    result = result.callUnary<FUNC_EXTRACT_YEAR>();
+    EXPECT_EQ(0, result.compare(ValueFactory::getIntegerValue(EXPECTED_YEAR)));
+
+    int EXPECTED_QUARTER = 12;
+    result = NValue::call<FUNC_VOLT_DATEADD_QUARTER>(args);
+    result = result.callUnary<FUNC_EXTRACT_MONTH>();
+    EXPECT_EQ(0, result.compare(ValueFactory::getIntegerValue(EXPECTED_QUARTER)));
+
+    int EXPECTED_MONTH = 10;
+    result = NValue::call<FUNC_VOLT_DATEADD_MONTH>(args);
+    result = result.callUnary<FUNC_EXTRACT_MONTH>();
+    EXPECT_EQ(0, result.compare(ValueFactory::getIntegerValue(EXPECTED_MONTH)));
+
+    int EXPECTED_DAY = 10;
+    result = NValue::call<FUNC_VOLT_DATEADD_DAY>(args);
+    result = result.callUnary<FUNC_EXTRACT_DAY>();
+    EXPECT_EQ(0, result.compare(ValueFactory::getIntegerValue(EXPECTED_DAY)));
+
+    int EXPECTED_HOUR = 2;
+    result = NValue::call<FUNC_VOLT_DATEADD_HOUR>(args);
+    result = result.callUnary<FUNC_EXTRACT_HOUR>();
+    EXPECT_EQ(0, result.compare(ValueFactory::getIntegerValue(EXPECTED_HOUR)));
+
+    int EXPECTED_MINUTE = 47;
+    result = NValue::call<FUNC_VOLT_DATEADD_MINUTE>(args);
+    result = result.callUnary<FUNC_EXTRACT_MINUTE>();
+    EXPECT_EQ(0, result.compare(ValueFactory::getIntegerValue(EXPECTED_MINUTE)));
+
+    int EXPECTED_SECOND = 41;
+    result = NValue::call<FUNC_VOLT_DATEADD_SECOND>(args);
+    result = result.callUnary<FUNC_EXTRACT_SECOND>();
+    EXPECT_EQ(0, result.compare(ValueFactory::getIntegerValue(EXPECTED_SECOND)));
+
+    // Test illegal arguments
+    const std::string expectedMsg = std::string("interval is too large for DATEADD function");
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MAX_YEAR_INTERVAL+1);
+    bool caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_YEAR>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MAX_QUARTER_INTERVAL+1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_QUARTER>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MAX_MONTH_INTERVAL+1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_MONTH>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MAX_DAY_INTERVAL+1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_DAY>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MAX_HOUR_INTERVAL+1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_HOUR>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MAX_MINUTE_INTERVAL+1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_MINUTE>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MAX_SECOND_INTERVAL+1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_SECOND>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MAX_MILLISECOND_INTERVAL+1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_MILLISECOND>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MAX_MICROSECOND_INTERVAL+1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_MICROSECOND>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MIN_YEAR_INTERVAL-1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_YEAR>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MIN_QUARTER_INTERVAL-1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_QUARTER>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MIN_MONTH_INTERVAL-1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_MONTH>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MIN_DAY_INTERVAL-1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_DAY>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MIN_HOUR_INTERVAL-1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_HOUR>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MIN_MINUTE_INTERVAL-1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_MINUTE>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MIN_SECOND_INTERVAL-1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_SECOND>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MIN_MILLISECOND_INTERVAL-1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_MILLISECOND>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
+    args[0] = ValueFactory::getBigIntValue(PTIME_MIN_MICROSECOND_INTERVAL-1);
+    caught = false;
+    try {
+        result = NValue::call<FUNC_VOLT_DATEADD_MICROSECOND>(args);
+    } catch (SQLException& exception) {
+        EXPECT_TRUE(exception.message().find(expectedMsg) != string::npos);
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+
 }
 
 int main() {

@@ -121,20 +121,6 @@ public class MaterializedViewBenchmark {
     }
 
     /**
-     * Class to use for returning values from the diffWriter method to the
-     * runBenchmark method.
-     */
-    public static class DiffRetVals {
-        double throughput;
-        double execute;
-
-        public DiffRetVals(double tp, double ex) {
-            throughput = tp;
-            execute = ex;
-        }
-    }
-
-    /**
      * The constructor method for the MaterializedViewBenchmark class.
      * @param config MatViewConfig object containing the configuration options.
      */
@@ -240,38 +226,6 @@ public class MaterializedViewBenchmark {
     }
 
     /**
-     * Writes the diff values to the csv file.
-     * @param savedThroughput Throughput class variable.
-     *        newThroughput   New throughput value.
-     *        savedExecute    Execute class variable.
-     *        newExecute      New Execute value.
-     *        name            Title to use for the row in the csv file.
-     *        stats           ClientStats class.
-     *        fw              FileWriter object with the csv file.
-     * @throws Exception if anything unexpected happens.
-     * @return Returns DiffRetVals class containing the throughput/execute values to update
-     *         the MaterializedViewBenchmark class variables with.
-     */
-    public DiffRetVals diffWriter(double savedThroughput, double newThroughput, double savedExecute,
-                                  double newExecute, String name, ClientStats stats, FileWriter fw) throws Exception {
-        if (savedThroughput > 0) {
-            savedThroughput = (((newThroughput - savedThroughput) /
-                                  newThroughput) * 100);
-            savedExecute = (((savedExecute - newExecute) /
-                               newExecute) * 100);
-            fw.append(String.format("%s,%d,-1,0,0,0,%.2f,%.2f,0,0,0,0,0,0\n",
-                                    name,
-                                    stats.getStartTimestamp(),
-                                    savedThroughput,
-                                    savedExecute));
-        } else {
-            savedThroughput = newThroughput;
-            savedExecute = newExecute;
-        }
-        return new DiffRetVals(savedThroughput, savedExecute);
-    }
-
-    /**
      * Prints the results and statistics about performance.
      * @param procedure The name of the stored procedure that was tested.
      * @throws Exception if anything unexpected happens.
@@ -338,42 +292,23 @@ public class MaterializedViewBenchmark {
                                 stats.getStartTimestamp(),
                                 stats.getTxnThroughput(),
                                 execTimeInMicroSec));
+    }
 
-        // Expecting the custom insert/delete procedure names ex. ids_insert
-        String[] procArray = procedure.split("_");
-        if (procArray[procArray.length-1].equals("insert")) {
-            DiffRetVals ret = diffWriter(insertThroughput, (double)stats.getTxnThroughput(), insertExecute,
-                                         execTimeInMicroSec, "Insert Diff", stats, fw);
-            insertThroughput = ret.throughput;
-            insertExecute = ret.execute;
-        } else if (procArray[procArray.length-1].equals("update") && procArray[1].equals("group")) {
-            DiffRetVals ret = diffWriter(updateGroupThroughput, (double)stats.getTxnThroughput(), updateGroupExecute,
-                                         execTimeInMicroSec, "Update Grp Diff", stats, fw);
-            updateGroupThroughput = ret.throughput;
-            updateGroupExecute = ret.execute;
-        } else if (procArray[procArray.length-1].equals("update") && procArray[1].equals("value")) {
-            DiffRetVals ret = diffWriter(updateValueThroughput, (double)stats.getTxnThroughput(), updateValueExecute,
-                                         execTimeInMicroSec, "Update Sum Diff", stats, fw);
-            updateValueThroughput = ret.throughput;
-            updateValueExecute = ret.execute;
-        } else {
-            DiffRetVals ret = diffWriter(deleteThroughput, (double)stats.getTxnThroughput(), deleteExecute,
-                                         execTimeInMicroSec, "Delete Diff", stats, fw);
-            deleteThroughput = ret.throughput;
-            deleteExecute = ret.execute;
-        }
+    private boolean isMinMatViewCase(String matView) {
+        return matView.toLowerCase().endsWith("minmatview") ||
+               matView.toLowerCase().endsWith("minmatviewopt") ||
+               matView.toLowerCase().endsWith("minmatviewbestopt");
     }
 
     /**
-     * Run half of the benchmark
-     * @param matView True if running with materialized view half, otherwise false.
+     * Run one phase of the benchmark
+     * @param matView Materialized view benchmark name.
      *        fw      File writer object to write stats to.
      * @throws Exception if anything unexpected happens.
      */
-    public void runHalf(String matView, FileWriter fw) throws Exception {
-        String systemStr;
-        String csvStr;
-        String procStr;
+    public void runPhase(String matView, FileWriter fw) throws Exception {
+        String systemStr = "", csvStr = "", procStr = "";
+
         switch (matView) {
             case "matView":
                 systemStr = "w/";
@@ -385,11 +320,47 @@ public class MaterializedViewBenchmark {
                 csvStr = "wo";
                 procStr = "ids";
                 break;
-            default:
+            case "minMatView":
                 systemStr = "w/ min";
                 csvStr = "w min";
                 procStr = "idsWithMinMatView";
+                break;
+            case "minMatViewOpt":
+                systemStr = "w/ min opt";
+                csvStr = "w min opt";
+                procStr = "idsWithMinMatViewOpt";
+                break;
+            case "4MinMatView":
+                systemStr = "4mins";
+                csvStr = "4mins";
+                procStr = "idsWith4MinMatView";
+                break;
+            case "4MinMatViewOpt":
+                systemStr = "4mins opt";
+                csvStr = "4mins opt";
+                procStr = "idsWith4MinMatViewOpt";
+                break;
+            case "MultiGroupsMinMatView":
+                systemStr = "multi groups min";
+                csvStr = "2g";
+                procStr = "idsWithMultiGroupsMinMatView";
+                break;
+            case "MultiGroupsMinMatViewOpt":
+                systemStr = "multi groups min opt";
+                csvStr = "2g opt";
+                procStr = "idsWithMultiGroupsMinMatViewOpt";
+                break;
+            case "MultiGroupsMinMatViewBestOpt":
+                systemStr = "multi groups min best opt";
+                csvStr = "2g b opt";
+                procStr = "idsWithMultiGroupsMinMatViewBestOpt";
+                break;
+            default:
+                throw new RuntimeException("Benchmark " + matView + " not found!");
         }
+
+        // apprunner has a file name length limit
+        assert(csvStr.length() <= 9);
 
         int grp = 1;
 
@@ -404,11 +375,25 @@ public class MaterializedViewBenchmark {
 
         if (config.group > 0) {
             for (int i=0; i<config.txn; i++){
-                client.callProcedure(new NullCallback(),
-                                     procStr + "_insert",
-                                     i,
-                                     grp,
-                                     i);
+                if (systemStr.startsWith("4")) {
+                    client.callProcedure(new NullCallback(),
+                            procStr + "_insert",
+                            i,
+                            grp,
+                            i, -i, i, -i);
+                } else if (systemStr.startsWith("multi")) {
+                    client.callProcedure(new NullCallback(),
+                            procStr + "_insert",
+                            i,
+                            grp, grp,
+                            i);
+                } else {
+                    client.callProcedure(new NullCallback(),
+                            procStr + "_insert",
+                            i,
+                            grp,
+                            i);
+                }
                 if (grp == config.group) {
                     grp = 1;
                 } else {
@@ -417,11 +402,25 @@ public class MaterializedViewBenchmark {
             }
         } else {
             for (int i=0; i<config.txn; i++){
-                client.callProcedure(new NullCallback(),
-                                     procStr + "_insert",
-                                     i,
-                                     i,
-                                     i);
+                if (systemStr.startsWith("4")) {
+                    client.callProcedure(new NullCallback(),
+                            procStr + "_insert",
+                            i,
+                            i,
+                            i, -i, i, -i);
+                } else if (systemStr.startsWith("multi")) {
+                    client.callProcedure(new NullCallback(),
+                            procStr + "_insert",
+                            i,
+                            grp, grp,
+                            i);
+                } else {
+                    client.callProcedure(new NullCallback(),
+                            procStr + "_insert",
+                            i,
+                            i,
+                            i);
+                }
             }
         }
         timer.cancel();
@@ -434,7 +433,7 @@ public class MaterializedViewBenchmark {
         }
         System.out.print(HORIZONTAL_RULE);
 
-        if (!matView.equals("minMatView")) {
+        if ( ! isMinMatViewCase(matView) ) {
             // grp is initialized to 2 for updating the grouping column to (grouping column = grouping column + 1)
             grp = 2;
 
@@ -507,8 +506,14 @@ public class MaterializedViewBenchmark {
         benchmarkStartTS = System.currentTimeMillis();
         schedulePeriodicStats();
 
-        System.out.println("\n\nDeleting from table " + systemStr + " materialized view...\n");
-        for (int i=0; i<config.txn; i++){
+        int numDeletes = config.txn;
+        if (systemStr.startsWith("multi")) {
+            // when the deletion with multi groups benchmarks are running fast, we can get rid of this limit
+            numDeletes = 10000;
+        }
+        System.out.println("\n\nDeleting " + numDeletes + " rows from table " + systemStr + " materialized view...\n");
+
+        for (int i=0; i<numDeletes; i++){
             client.callProcedure(new NullCallback(),
                                  procStr + "_delete",
                                  i);
@@ -562,6 +567,41 @@ public class MaterializedViewBenchmark {
                                      i,
                                      i,
                                      i);
+                client.callProcedure(new NullCallback(),
+                                     "idsWithMinMatViewOpt_insert",
+                                     i,
+                                     i,
+                                     i);
+                client.callProcedure(new NullCallback(),
+                                     "idsWith4MinMatView_insert",
+                                     i,
+                                     i,
+                                     i, i, i, i);
+                client.callProcedure(new NullCallback(),
+                                     "idsWith4MinMatViewOpt_insert",
+                                     i,
+                                     i,
+                                     i, i, i, i);
+                client.callProcedure(new NullCallback(),
+                                    "idsWith4MinMatViewOpt_insert",
+                                    i,
+                                    i,
+                                    i, i, i, i);
+                client.callProcedure(new NullCallback(),
+                                    "idsWithMultiGroupsMinMatView_insert",
+                                    i,
+                                    i, i,
+                                    i);
+                client.callProcedure(new NullCallback(),
+                                    "idsWithMultiGroupsMinMatViewOpt_insert",
+                                    i,
+                                    i, i,
+                                    i);
+                client.callProcedure(new NullCallback(),
+                                    "idsWithMultiGroupsMinMatViewBestOpt_insert",
+                                    i,
+                                    i, i,
+                                    i);
             }
             client.drain();
             for (int i=0; i<config.warmup; i++){
@@ -574,6 +614,24 @@ public class MaterializedViewBenchmark {
                 client.callProcedure(new NullCallback(),
                                      "idsWithMinMatView_delete",
                                      i);
+                client.callProcedure(new NullCallback(),
+                                     "idsWithMinMatViewOpt_delete",
+                                     i);
+                client.callProcedure(new NullCallback(),
+                                     "idsWith4MinMatView_delete",
+                                     i);
+                client.callProcedure(new NullCallback(),
+                                     "idsWith4MinMatViewOpt_delete",
+                                     i);
+                client.callProcedure(new NullCallback(),
+                                    "idsWithMultiGroupsMinMatView_delete",
+                                    i);
+                client.callProcedure(new NullCallback(),
+                                    "idsWithMultiGroupsMinMatViewOpt_delete",
+                                    i);
+                client.callProcedure(new NullCallback(),
+                                    "idsWithMultiGroupsMinMatViewBestOpt_delete",
+                                    i);
             }
             client.drain();
         }
@@ -584,22 +642,27 @@ public class MaterializedViewBenchmark {
         }
 
         System.out.println("\nRunning benchmark...\n");
-        runHalf("matView", fw);
-        System.out.print(HORIZONTAL_RULE);
-        runHalf("noMatView", fw);
-        System.out.print(HORIZONTAL_RULE);
 
-        // reset class variables so that diff is not written to the csv file
-        insertThroughput = insertExecute = deleteThroughput = deleteExecute = 0;
-        runHalf("minMatView", fw);
+        runEachBenchmark(fw, "matView", "noMatView");
+        runEachBenchmark(fw, "minMatView", "minMatViewOpt");
+        runEachBenchmark(fw, "4MinMatView", "4MinMatViewOpt");
+        runEachBenchmark(fw, "MultiGroupsMinMatView", "MultiGroupsMinMatViewOpt", "MultiGroupsMinMatViewBestOpt");
+
         benchmarkActive = false;
-
         if ((config.statsfile != null) && (config.statsfile.length() != 0)) {
             fw.close();
         }
 
         // close down the client connections
         client.close();
+    }
+
+    private void runEachBenchmark(FileWriter fw, String... names) throws Exception {
+        insertThroughput = insertExecute = deleteThroughput = deleteExecute = 0;
+        for (String name: names) {
+            runPhase(name, fw);
+            System.out.print(HORIZONTAL_RULE);
+        }
     }
 
     /**
